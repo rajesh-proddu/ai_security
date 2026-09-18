@@ -29,10 +29,10 @@ func (o OnError) Action() core.Action {
 
 // Policy is a parsed bundle.
 //
-// DESIGN §3.6 defines no version key in the YAML, but Verdict.PolicyVersion
-// (§3.1) needs one. Version is therefore derived by the loader from the bundle
-// bytes and is not a YAML field; Phase 3 replaces it with the version carried
-// by the signed bundle from the control plane (§3.7).
+// Version is derived by the loader from the bundle bytes and is not a YAML
+// field, per DESIGN §3.6: it ties an audit event to the exact rules that
+// produced it until the control plane issues versioned, signed bundles in
+// Phase 3, which then supply the value without changing the field's shape.
 type Policy struct {
 	Tenant   string   `yaml:"tenant"`
 	Defaults Defaults `yaml:"defaults"`
@@ -62,6 +62,10 @@ type Condition struct {
 	TypeIn         StringList `yaml:"type_in"`
 	Tool           string     `yaml:"tool"`
 	SessionTainted *bool      `yaml:"session_tainted"`
+	// PinChanged matches a tool_definition whose hash differs from the one
+	// approved earlier — the rug-pull case of DESIGN §4. Parsed in Phase 0;
+	// the pin comparison itself is Phase 1.
+	PinChanged *bool `yaml:"pin_changed"`
 }
 
 // StringList accepts either a scalar or a sequence: DESIGN §3.6 writes

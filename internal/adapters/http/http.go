@@ -56,9 +56,7 @@ var errUnknownSurface = errors.New("unknown surface")
 
 func (r requestDTO) toCore() (core.Request, error) {
 	surface := core.Surface(r.Surface)
-	switch surface {
-	case core.SurfaceInput, core.SurfaceToolCall, core.SurfaceToolResult, core.SurfaceOutput:
-	default:
+	if !surface.Valid() {
 		return core.Request{}, errUnknownSurface
 	}
 	req := core.Request{

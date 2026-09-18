@@ -5,15 +5,40 @@ package core
 
 import "context"
 
-// Surface is one of the four inspected hops (DESIGN §2, §3.6).
+// Surface is one of the five inspected hops (DESIGN §2, §3.6).
 type Surface string
 
 const (
-	SurfaceInput      Surface = "input"
-	SurfaceToolCall   Surface = "tool_call"
-	SurfaceToolResult Surface = "tool_result"
-	SurfaceOutput     Surface = "output"
+	// SurfaceToolDefinition is a tool's advertised name, description and schema
+	// (MCP `tools/list`). It is a surface in its own right so poisoning and
+	// rug-pull rules can name it in policy (DESIGN §1, §4).
+	SurfaceToolDefinition Surface = "tool_definition"
+	SurfaceInput          Surface = "input"
+	SurfaceToolCall       Surface = "tool_call"
+	SurfaceToolResult     Surface = "tool_result"
+	SurfaceOutput         Surface = "output"
 )
+
+// Surfaces lists every surface, in the order of the DESIGN §2 goals.
+func Surfaces() []Surface {
+	return []Surface{
+		SurfaceToolDefinition,
+		SurfaceInput,
+		SurfaceToolCall,
+		SurfaceToolResult,
+		SurfaceOutput,
+	}
+}
+
+// Valid reports whether s is a known surface.
+func (s Surface) Valid() bool {
+	switch s {
+	case SurfaceToolDefinition, SurfaceInput, SurfaceToolCall, SurfaceToolResult, SurfaceOutput:
+		return true
+	default:
+		return false
+	}
+}
 
 // Trust marks whether a part came from a source that may carry attacker-controlled
 // instructions (tool results, RAG content) — DESIGN §3.4.

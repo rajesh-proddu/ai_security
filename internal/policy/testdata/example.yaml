@@ -14,3 +14,6 @@ rules:
   - surface: [tool_call]
     when: { tool: "email.send", session_tainted: true }
     action: block
+  - surface: [tool_definition]
+    when: { pin_changed: true }        # hash differs from the definition approved earlier
+    action: block

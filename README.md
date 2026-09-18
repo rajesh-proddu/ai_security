@@ -1,8 +1,9 @@
 # ai_security
 
 Security layer for enterprise AI agents: an inspection, policy and evidence service that agent gateways
-(agentgateway, LiteLLM) call to inspect input prompts, tool calls, tool/RAG content and LLM output — blocking
-prompt injection and redacting sensitive data. Customer-run data plane, vendor-hosted control plane.
+(agentgateway, LiteLLM) call to inspect tool definitions, input prompts, tool calls, tool/RAG content and LLM
+output — blocking prompt injection and redacting sensitive data. Customer-run data plane, vendor-hosted control
+plane.
 
 It is not a proxy: auth, routing, retries and provider adapters stay in the gateway.
 

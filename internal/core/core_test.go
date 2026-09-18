@@ -14,6 +14,29 @@ func TestActionSeverityOrder(t *testing.T) {
 	}
 }
 
+func TestSurfaceValid(t *testing.T) {
+	// The five surfaces of DESIGN §2. Surfaces() and Valid() must agree, or a
+	// surface can be inspected but never named in a policy rule.
+	want := []Surface{SurfaceToolDefinition, SurfaceInput, SurfaceToolCall, SurfaceToolResult, SurfaceOutput}
+	got := Surfaces()
+	if len(got) != len(want) {
+		t.Fatalf("Surfaces() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Surfaces() = %v, want %v", got, want)
+		}
+		if !want[i].Valid() {
+			t.Errorf("%s must be valid", want[i])
+		}
+	}
+	for _, bad := range []Surface{"", "telepathy", "tool_definitions", "Input"} {
+		if bad.Valid() {
+			t.Errorf("%q must not be valid", bad)
+		}
+	}
+}
+
 func TestMostSevere(t *testing.T) {
 	tests := []struct {
 		name string

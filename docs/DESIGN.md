@@ -15,6 +15,7 @@ Each of those hops is an attack or leak surface:
 
 | Surface | Direction | Main risks |
 |---|---|---|
+| **Tool definition** | MCP server → agent | Tool poisoning (instructions hidden in a tool's name/description/schema), rug pull (a pinned definition changing after approval) |
 | **Input prompt** | user → agent → LLM | Direct prompt injection, jailbreaks, users pasting sensitive data into third-party LLMs |
 | **Tool call** | agent → tool | Excessive agency (destructive or out-of-scope calls), data exfiltration through arguments (URLs, emails, queries) |
 | **Tool result / RAG content** | tool / retriever → agent | *Indirect* prompt injection hidden in retrieved content, sensitive data pulled into context the requester shouldn't see |
@@ -34,7 +35,7 @@ policy and evidence trail. That cross-surface layer is the product.
 ## 2. Goals and non-goals
 
 **Goals (v1 — delivered across Roadmap Phases 0–2)**
-- One **inspection pipeline** applied to four surfaces: input prompt, tool call arguments, tool/RAG results, LLM output.
+- One **inspection pipeline** applied to five surfaces: **tool definition** (`tools/list`), input prompt, tool call arguments, tool/RAG results, LLM output. Tool definitions are a surface in their own right so rug-pull and poisoning rules can name them in policy.
 - **Gateway-neutral integration**: a core that knows nothing about any gateway, plus thin adapters.
   agentgateway adapter first; LiteLLM adapter proves the swap; a plain HTTP/SDK mode for agents with no gateway.
 - Actions per finding: **allow, flag (audit only), redact, block**.
@@ -135,7 +136,7 @@ Request
 | `pii` | all | India pack (§6 decision 4): Aadhaar (Verhoeff), PAN, UPI VPA, IFSC + account, Indian mobile, passport, GSTIN, card (Luhn); plus email | Regex misses unstructured PII (names, addresses) → Phase 5 NER model |
 | `secrets` | all | Provider key patterns (AWS, GitHub, Slack, OpenAI, …) + entropy check | Unknown key formats slip through |
 | `custom_dict` | all | Tenant keyword/regex lists (project codenames, customer IDs), Aho-Corasick | Exact-match only |
-| `injection_heuristic` | input, tool result, tool definitions | Instruction-override phrases, role/delimiter spoofing, hidden text (zero-width, HTML comments), encoded payloads | **Easily bypassed by paraphrase.** A signal, never the sole protection. |
+| `injection_heuristic` | input, tool result, tool definition | Instruction-override phrases, role/delimiter spoofing, hidden text (zero-width, HTML comments), encoded payloads | **Easily bypassed by paraphrase.** A signal, never the sole protection. |
 | `injection_ml` | input, tool result | Open-source prompt-injection classifier on CPU (§6 decision 1), Python sidecar over gRPC | Adds latency; false positives on security-related text; evaluated every release |
 | `exfil_url` | tool call, output | URLs/markdown images with query strings carrying data; domain allow-list | Covert channels beyond URLs not covered |
 
@@ -186,9 +187,17 @@ rules:
   - surface: [tool_call]
     when: { tool: "email.send", session_tainted: true }
     action: block
+  - surface: [tool_definition]
+    when: { pin_changed: true }        # hash differs from the definition approved earlier
+    action: block
 ```
 
 Open Policy Agent (Rego) is the candidate engine for Phase 4 RBAC; v1 keeps its own small evaluator.
+
+**`Verdict.PolicyVersion`** — until the control plane issues versioned, signed bundles (Phase 3), the version is
+**derived from the policy bytes** (truncated SHA-256; `default` for the built-in policy). It exists so an audit
+event can be tied to the exact rules that produced it; the bundle's own version replaces the hash in Phase 3,
+and the field's shape does not change.
 
 ### 3.7 Control plane and data retention
 
@@ -212,7 +221,7 @@ only there. Events carry `trace_id` and `session_id` so later phases can reconst
 |---|---|---|
 | Direct prompt injection / jailbreak | `injection_heuristic` + `injection_ml` on input | Novel paraphrases; classifier FN rate |
 | Indirect injection via tool/RAG content | Scan results, session taint → block risky follow-up calls, spotlighting | Injections that steer answers without calling tools (e.g. ranking manipulation, §7); unmarked RAG text on the LLM path |
-| Tool poisoning / rug pull | Scan `tools/list`, pin tool-definition hashes | Malicious-but-approved tools |
+| Tool poisoning / rug pull | Scan the `tool_definition` surface (`tools/list`), pin definition hashes | Malicious-but-approved tools |
 | Data exfiltration via tool args or output | `pii`/`secrets`/`custom_dict`/`exfil_url` + redact/block | Encoded or split-across-calls leakage |
 | Sensitive data sent to LLM providers | Input DLP with redaction before the gateway forwards | Unstructured PII until NER lands |
 | Bypass by calling providers/tools directly | Not enforceable by us — egress NetworkPolicy is a stated deployment requirement | Misconfigured egress |
@@ -267,3 +276,5 @@ What the agent needs before it can be protected (to raise with `ai_platform` / t
 configuration (agentgateway; LiteLLM for the swap test) rather than keeping its own copy. `ai_platform` has no
 gateway config committed yet (docs only as of 2026-09-17), so this is a cross-repo dependency: until it lands,
 Phase 1 uses a temporary local agentgateway config that is deleted when `ai_platform` P0 ships.
+Consequently Phase 0's compose file starts the inspection service only; the gateway, vLLM and sample MCP server
+are profile-gated placeholders until that config exists.

@@ -23,8 +23,8 @@ func TestLoadExamplePolicy(t *testing.T) {
 	if p.Version == "" {
 		t.Error("loader must derive a policy version")
 	}
-	if len(p.Rules) != 4 {
-		t.Fatalf("rules = %d, want 4", len(p.Rules))
+	if len(p.Rules) != 5 {
+		t.Fatalf("rules = %d, want 5", len(p.Rules))
 	}
 
 	r0 := p.Rules[0]
@@ -71,6 +71,17 @@ func TestLoadExamplePolicy(t *testing.T) {
 	}
 	if r3.Action != core.ActionBlock {
 		t.Errorf("rule 3 action = %q, want block", r3.Action)
+	}
+
+	r4 := p.Rules[4]
+	if !r4.Surface.Contains(string(core.SurfaceToolDefinition)) {
+		t.Errorf("rule 4 surface = %v, want tool_definition", r4.Surface)
+	}
+	if r4.When.PinChanged == nil || !*r4.When.PinChanged {
+		t.Errorf("rule 4 pin_changed = %v, want true", r4.When.PinChanged)
+	}
+	if r4.Action != core.ActionBlock {
+		t.Errorf("rule 4 action = %q, want block", r4.Action)
 	}
 }
 

@@ -50,6 +50,25 @@ func TestHandlerRequests(t *testing.T) {
 	}
 }
 
+// Every surface the core knows must be addressable over the wire, including
+// tool_definition (DESIGN §2).
+func TestHandlerAcceptsEverySurface(t *testing.T) {
+	for _, surface := range core.Surfaces() {
+		t.Run(string(surface), func(t *testing.T) {
+			in := &stubInspector{verdict: core.Verdict{Action: core.ActionAllow}}
+			rec := httptest.NewRecorder()
+			body := `{"surface":"` + string(surface) + `","parts":[{"text":"x"}]}`
+			NewHandler(in).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, InspectPath, strings.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body)
+			}
+			if in.saw.Surface != surface {
+				t.Fatalf("surface = %q, want %q", in.saw.Surface, surface)
+			}
+		})
+	}
+}
+
 func TestHandlerMapsBothWays(t *testing.T) {
 	in := &stubInspector{verdict: core.Verdict{
 		Action:        core.ActionRedact,
