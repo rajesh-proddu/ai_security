@@ -1,0 +1,16 @@
+tenant: acme
+defaults: { on_error: fail_closed }        # detector/ML failure → block (fail_open allowed per route)
+rules:
+  - surface: [input, tool_result]
+    when: { detector: injection_ml, score_gte: 0.9 }
+    action: block
+  - surface: [tool_result]
+    when: { detector: injection_heuristic }
+    action: flag
+    taint_session: true
+  - surface: [output, tool_call]
+    when: { detector: [pii, secrets], type_in: [card, aws_key, aadhaar] }
+    action: redact
+  - surface: [tool_call]
+    when: { tool: "email.send", session_tainted: true }
+    action: block

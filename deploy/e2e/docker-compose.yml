@@ -1,0 +1,59 @@
+# Phase 1 e2e stack — SKELETON. See README.md before using.
+#
+# Only `inspector` is verified and runs by default. The other three services are
+# behind the `gateway` profile because their images and configuration are not
+# settled yet (the gateway config is owned by the ai_platform repo).
+
+name: ai-security-e2e
+
+services:
+  inspector:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      ADDR: ":8080"
+      # POLICY_FILE: /etc/ai_security/policy.yaml
+    ports:
+      - "8080:8080"
+    # No compose healthcheck: the distroless image has no shell and no curl, so
+    # probing /healthz needs either a -healthcheck flag on the binary or a
+    # different base image. TODO(phase-1): pick one when the gateway needs to
+    # depend on this service being ready.
+
+  # TODO(phase-1): the agentgateway config (LLM + MCP routes, ext_proc pointing
+  # at inspector:8080, failureMode) comes from ai_platform P0 — ROADMAP
+  # "Cross-repo dependencies". Until it lands, a temporary local config lives
+  # here and is deleted when ai_platform ships its own.
+  # Image and config schema are NOT verified: https://agentgateway.dev/docs/
+  agentgateway:
+    profiles: ["gateway"]
+    image: "" # TODO(phase-1): pin the agentgateway image and tag
+    depends_on:
+      - inspector
+      - vllm
+      - mcp-sample
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./gateway:/etc/agentgateway:ro # TODO(phase-1): config file, mount path unverified
+
+  # Local OpenAI-compatible model server: no provider account, no token spend,
+  # no network in CI (DESIGN decision 3). The suite asserts on the detectors,
+  # not on model quality, so a small model is fine.
+  vllm:
+    profiles: ["gateway"]
+    image: "" # TODO(phase-1): pin a CPU-capable vLLM image; the default vllm/vllm-openai
+      # image expects a GPU and this lab is CPU-only.
+    command: [] # TODO(phase-1): --model <small model>, served on :8000
+    ports:
+      - "8000:8000"
+
+  # Stands in for MCP tools until an MCP-based agent exists (DESIGN §7). It must
+  # expose a tools/list and a tools/call, including a "poisoned" tool
+  # description and a high-risk tool (e.g. email.send) for the taint cases.
+  mcp-sample:
+    profiles: ["gateway"]
+    image: "" # TODO(phase-1): build a small MCP server in this repo, or pin a sample image
+    ports:
+      - "8090:8090"
