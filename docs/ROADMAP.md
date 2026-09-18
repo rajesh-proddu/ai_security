@@ -19,7 +19,9 @@ and a proven swap to LiteLLM. ai_security does not build a proxy; the gateway co
 
 | Needed by | What | Owner |
 |---|---|---|
-| Phase 1 e2e | agentgateway config (LLM + MCP routes) | `ai_platform` P0 — temporary local config in ai_security until it lands |
+| Phase 1 e2e | agentgateway config (LLM + MCP routes) | **Landed** — `ai_platform` branch `p0-scaffold`: `gateway/config.yaml` + `deploy/local/docker-compose.yml`. The ai_security compose skeleton should consume it instead of keeping a copy. |
+| Phase 1 | **Listener ports (contract defined by `ai_platform/gateway/README.md`)**: inspector **`:9000` ext_proc gRPC**, **`:8080` webhook**. Gateway `:3000`, vLLM `:8000`, Redis `:6379`, sample MCP `:3001`. | ai_security must match |
+| Phase 1 | Gateway sets `failureMode: failClosed` on both routes, so the gateway rejects `/v1/*` when the inspector is down. Policy default `on_error: fail_closed` already matches (DESIGN §3.6); keep them in lockstep. | both repos |
 | Phase 1 e2e | Reco agent calls LLMs through the gateway and sends `x-session-id` | `videostreamingplatform-recommendations` (`ai_platform` HLD open decision 4) |
 | Phase 2 | Reco agent marks retrieved content as untrusted (SDK marker or separate message parts) | `videostreamingplatform-recommendations` |
 | Phase 2 | LiteLLM config equivalent to the agentgateway one | `ai_platform` |
