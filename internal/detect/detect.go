@@ -1,11 +1,13 @@
-// Package detect holds the detector contract and the registry the pipeline runs.
-// The v1 detectors themselves (DESIGN §3.3) land in Phase 1; this package ships
-// the interface, the registry and the vocabulary they share.
+// Package detect holds the detector contract, the registry the pipeline runs,
+// and the v1 detector set of DESIGN §3.3: pii (the India pack of decision 4),
+// secrets, custom_dict, injection_heuristic and exfil_url. injection_ml is a
+// Python sidecar and belongs to Phase 2.
 package detect
 
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/rajesh-proddu/ai_security/internal/core"
 )
@@ -59,26 +61,54 @@ func (r *Registry) Names() []string {
 	return out
 }
 
-// Detect runs every registered detector and concatenates their findings. The
-// first error aborts: the pipeline turns it into the policy's on_error action.
+// Detect runs every registered detector in parallel and concatenates their
+// findings in registration order, so a verdict does not depend on which
+// goroutine finished first. The first error aborts: the pipeline turns it into
+// the policy's on_error action.
 //
-// TODO(phase-1): run the fast set in parallel to hold the p99 ≤ 20 ms budget
-// (DESIGN §2), and run the ML set per route.
+// TODO(phase-2): run the ML set per route rather than with the fast set
+// (DESIGN §3.3) — it has its own, larger latency budget.
 func (r *Registry) Detect(ctx context.Context, req core.Request) ([]core.Finding, error) {
+	switch len(r.order) {
+	case 0:
+		return nil, nil
+	case 1:
+		return r.one(ctx, r.order[0], req)
+	}
+
+	results := make([][]core.Finding, len(r.order))
+	errs := make([]error, len(r.order))
+	var wg sync.WaitGroup
+	for i, d := range r.order {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = r.one(ctx, d, req)
+		}()
+	}
+	wg.Wait()
+
 	var findings []core.Finding
-	for _, d := range r.order {
-		got, err := d.Detect(ctx, req)
-		if err != nil {
-			return nil, fmt.Errorf("detect %s: %w", d.Name(), err)
+	for i := range results {
+		if errs[i] != nil {
+			return nil, errs[i]
 		}
-		for i := range got {
-			if got[i].Detector == "" {
-				got[i].Detector = d.Name()
-			}
-		}
-		findings = append(findings, got...)
+		findings = append(findings, results[i]...)
 	}
 	return findings, nil
+}
+
+func (r *Registry) one(ctx context.Context, d Detector, req core.Request) ([]core.Finding, error) {
+	got, err := d.Detect(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("detect %s: %w", d.Name(), err)
+	}
+	for i := range got {
+		if got[i].Detector == "" {
+			got[i].Detector = d.Name()
+		}
+	}
+	return got, nil
 }
 
 var _ core.DetectorSet = (*Registry)(nil)
