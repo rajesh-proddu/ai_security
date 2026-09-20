@@ -4,12 +4,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	httpadapter "github.com/rajesh-proddu/ai_security/internal/adapters/http"
 	"github.com/rajesh-proddu/ai_security/internal/audit"
@@ -22,6 +25,7 @@ import (
 
 type config struct {
 	addr        string
+	redisAddr   string
 	policyFile  string
 	auditFile   string
 	taintTTL    time.Duration
@@ -31,6 +35,7 @@ type config struct {
 func loadConfig() (config, error) {
 	c := config{
 		addr:        env("ADDR", ":8080"),
+		redisAddr:   os.Getenv("REDIS_ADDR"),
 		policyFile:  os.Getenv("POLICY_FILE"),
 		auditFile:   os.Getenv("AUDIT_FILE"),
 		taintTTL:    time.Hour,
@@ -91,10 +96,25 @@ func run() error {
 		return err
 	}
 
+	// Taint and tool pins are shared state: with more than one replica they
+	// belong in Redis (DESIGN §5), and in memory only for a single process.
+	var sessions session.Store = session.NewMemory()
+	if cfg.redisAddr != "" {
+		client := redis.NewClient(&redis.Options{Addr: cfg.redisAddr})
+		defer client.Close()
+		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := client.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			return fmt.Errorf("redis at %s: %w", cfg.redisAddr, err)
+		}
+		sessions = session.NewRedis(client, "")
+	}
+
 	pipeline := core.NewPipeline(
 		registry,
 		policy.NewEvaluator(pol),
-		session.NewMemory(),
+		sessions,
 		audit.NewJSONLSink(auditOut),
 		cfg.taintTTL,
 	)

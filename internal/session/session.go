@@ -2,9 +2,9 @@
 // session has read injected content (taint), and the tool-definition hashes
 // pinned for it (rug-pull defence).
 //
-// TODO(phase-1): add a Redis-backed Store — DESIGN §5 and decision 2 make Redis
-// the shared, TTL-bounded store for multi-replica deployments. The in-memory
-// implementation here is single-process only and is for local runs and tests.
+// Two implementations: Memory, which is single-process and is what local runs
+// and tests use, and Redis, which is the shared, TTL-bounded store DESIGN §5
+// and decision 2 call for when the inspector runs more than one replica.
 package session
 
 import (
