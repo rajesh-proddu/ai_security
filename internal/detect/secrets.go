@@ -35,7 +35,10 @@ var providerKeys = []struct {
 
 // entropyCandidate is what the entropy check considers at all: a long,
 // unbroken token. Requiring length and a mixed alphabet keeps prose out.
-var entropyCandidate = regexp.MustCompile(`[A-Za-z0-9+/_\-=]{24,}`)
+// `=` is allowed only as trailing base64 padding — treating it as a token
+// character would glue `payload=` onto the value behind it and make the token
+// undecodable, which is exactly the case the readable-base64 skip exists for.
+var entropyCandidate = regexp.MustCompile(`[A-Za-z0-9+/_\-]{24,}={0,2}`)
 
 // entropyThreshold is in bits per character. English prose sits near 2-3;
 // base64-encoded random bytes approach 6.
@@ -61,9 +64,22 @@ func (Secrets) scan(part int, text string) []core.Finding {
 			})
 		}
 	}
+	// A provider key is also a high-entropy token, and the entropy candidate
+	// often swallows the surrounding assignment as well, so it is not merely
+	// contained in the key. Anything overlapping a known key is dropped: the
+	// specific type is strictly more useful than "this looks random".
+	keys := out
 	for _, loc := range entropyCandidate.FindAllStringIndex(text, -1) {
 		tok := text[loc[0]:loc[1]]
 		if !mixedAlphabet(tok) || ShannonEntropy(tok) < entropyThreshold {
+			continue
+		}
+		// Base64 that decodes to readable text is an encoded message, not a
+		// credential; the normalizer reports it as an encoded payload.
+		if _, readable := DecodeReadableBase64(tok); readable {
+			continue
+		}
+		if overlapsAny(loc, keys) {
 			continue
 		}
 		out = append(out, core.Finding{
@@ -73,9 +89,17 @@ func (Secrets) scan(part int, text string) []core.Finding {
 			Score:    0.5,
 		})
 	}
-	// A provider key is also a high-entropy token; report it once, as the
-	// specific type.
-	return suppressContained(out)
+	return out
+}
+
+// overlapsAny reports whether loc shares any byte with one of the findings.
+func overlapsAny(loc []int, findings []core.Finding) bool {
+	for _, f := range findings {
+		if loc[0] < f.Span.End && f.Span.Start < loc[1] {
+			return true
+		}
+	}
+	return false
 }
 
 // mixedAlphabet requires digits and letters of both cases, which a hex digest

@@ -1,8 +1,6 @@
 package normalize
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html"
@@ -10,10 +8,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/rajesh-proddu/ai_security/internal/core"
+	"github.com/rajesh-proddu/ai_security/internal/detect"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -243,50 +241,35 @@ func nfkc(in string) (string, core.OffsetMap, []evidence) {
 
 var base64Re = regexp.MustCompile(`[A-Za-z0-9+/_-]{16,}={0,2}`)
 
-// expandBase64 appends the decoded text after any base64 token that decodes to
-// readable text. The token itself is kept — its entropy is a signal for the
-// secrets detector — and the decoded text maps back to the whole token.
+// expandBase64 appends the text of any base64 token that decodes to readable
+// content, after the original text rather than inside it. Inline expansion
+// would break the structures detectors match on — a markdown image whose URL
+// carries a base64 payload stops looking like a markdown image. The token
+// itself is untouched, and every appended payload maps back to its token.
 func expandBase64(in string) (string, core.OffsetMap, []evidence) {
-	var b builder
+	type payload struct {
+		text       string
+		start, end int
+	}
+	var payloads []payload
 	var ev []evidence
-	prev := 0
 	for _, loc := range base64Re.FindAllStringIndex(in, -1) {
-		decoded, ok := decodeBase64(in[loc[0]:loc[1]])
+		decoded, ok := detect.DecodeReadableBase64(in[loc[0]:loc[1]])
 		if !ok {
 			continue
 		}
-		b.keep(in, prev, loc[1])
-		b.replace(" "+decoded, loc[0], loc[1])
+		payloads = append(payloads, payload{text: decoded, start: loc[0], end: loc[1]})
 		ev = append(ev, evidence{typ: TypeEncodedPayload, start: loc[0], end: loc[1], score: 0.5})
-		prev = loc[1]
 	}
-	b.keep(in, prev, len(in))
+	if len(payloads) == 0 {
+		return in, core.OffsetMap{}, nil
+	}
+
+	var b builder
+	b.keep(in, 0, len(in))
+	for _, p := range payloads {
+		b.replace("\n"+p.text, p.start, p.end)
+	}
 	out, m := b.result(in)
 	return out, m, ev
-}
-
-var base64Encodings = []*base64.Encoding{
-	base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding,
-}
-
-// decodeBase64 accepts a token only if it decodes to mostly printable UTF-8
-// text of some length. Random identifiers that happen to be valid base64
-// decode to binary and are rejected.
-func decodeBase64(tok string) (string, bool) {
-	for _, enc := range base64Encodings {
-		raw, err := enc.DecodeString(tok)
-		if err != nil || len(raw) < 8 || !utf8.Valid(raw) {
-			continue
-		}
-		printable := 0
-		for _, r := range string(raw) {
-			if unicode.IsPrint(r) || r == '\n' || r == '\t' {
-				printable++
-			}
-		}
-		if printable*10 >= utf8.RuneCount(raw)*9 {
-			return string(bytes.TrimSpace(raw)), true
-		}
-	}
-	return "", false
 }

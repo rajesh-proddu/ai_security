@@ -33,7 +33,7 @@ var overrideRe = regexp.MustCompile(`(?i)\b(?:` +
 	`(?:instruction|instructions|prompt|prompts|rule|rules|direction|directions|context|guardrail|guardrails)` +
 	`|new\s+instructions?\s*:` +
 	`|instead\s+of\s+(?:the\s+)?(?:above|previous|your)\s+(?:instructions?|rules?)` +
-	`|you\s+are\s+now\s+(?:a|an|in)\b` +
+	`|you\s+are\s+now\s+(?:a|an|in|no\s+longer|unrestricted|jailbroken|free|allowed)\b` +
 	`|(?:act|behave)\s+as\s+(?:if\s+you\s+are\s+)?(?:a|an)?\s*(?:developer|dan|jailbroken|unrestricted)` +
 	`|(?:do\s+not|don't|never)\s+(?:tell|mention|reveal|inform)\s+(?:the\s+)?user` +
 	`|reveal\s+(?:your\s+)?(?:system\s+prompt|instructions|prompt)` +

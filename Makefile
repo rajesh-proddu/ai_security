@@ -1,7 +1,7 @@
 BINARY := bin/inspector
 PKG    := ./...
 
-.PHONY: all build test vet lint fmt run tidy vuln clean
+.PHONY: all build test vet lint fmt run tidy vuln eval eval-baseline bench clean
 
 all: build test vet
 
@@ -23,6 +23,16 @@ fmt:
 
 run: build
 	./$(BINARY)
+
+eval:
+	go run ./cmd/eval -check evals/baseline.json
+
+eval-baseline:
+	go run ./cmd/eval -write-baseline evals/baseline.json
+
+# Fast-path latency against the DESIGN §2 budget (p99 <= 20 ms).
+bench:
+	go test ./internal/core/ -run '^$$' -bench BenchmarkFastPath -benchtime 200x -v
 
 tidy:
 	go mod tidy
