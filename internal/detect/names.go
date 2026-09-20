@@ -29,10 +29,33 @@ const (
 )
 
 // Secrets types. DESIGN §3.3 names the providers (AWS, GitHub, Slack, OpenAI)
-// and §3.6 uses `aws_key`; the rest follow the same naming.
+// and §3.6 uses `aws_key`; the rest follow the same naming. TypeHighEntropy is
+// what the entropy check reports when a token looks like a credential but
+// matches no known provider pattern.
 const (
 	TypeAWSKey      = "aws_key"
 	TypeGitHubToken = "github_token"
 	TypeSlackToken  = "slack_token"
 	TypeOpenAIKey   = "openai_key"
+	TypeHighEntropy = "high_entropy"
 )
+
+// Injection types. DESIGN §3.3 describes what injection_heuristic looks for —
+// instruction-override phrases, role/delimiter spoofing, hidden text, encoded
+// payloads — but does not name the types; these follow its wording.
+const (
+	TypeInstructionOverride = "instruction_override"
+	TypeRoleSpoof           = "role_spoof"
+	TypeHiddenText          = "hidden_text"
+	TypeEncodedPayload      = "encoded_payload"
+)
+
+// Exfiltration types, from the DESIGN §3.3 exfil_url row.
+const (
+	TypeDataBearingURL   = "data_bearing_url"
+	TypeMarkdownImage    = "markdown_image"
+	TypeDisallowedDomain = "disallowed_domain"
+)
+
+// CustomDict types: a tenant dictionary hit.
+const TypeCustomTerm = "custom_term"
