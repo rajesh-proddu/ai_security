@@ -25,14 +25,30 @@ var _ core.Evaluator = (*Evaluator)(nil)
 // Policy returns the policy in force.
 func (e *Evaluator) Policy() *Policy { return e.policy }
 
-// Evaluate is pass-through in Phase 0: every hop is allowed and the policy
-// version is stamped on the verdict.
+// Evaluate applies every rule and combines the ones that match: the most severe
+// action wins (DESIGN §3.3), taint_session is OR-ed across matches, and the
+// redaction spans are those of the findings selected by a redact rule.
 //
-// TODO(phase-1): match e.policy.Rules against in.Request.Surface, in.Findings
-// and in.SessionTainted, and take the most severe matching action
-// (core.MostSevere) with taint_session OR-ed across matches — DESIGN §3.3, §3.6.
-func (e *Evaluator) Evaluate(_ context.Context, _ core.EvalInput) (core.Decision, error) {
-	return core.Decision{Action: core.ActionAllow, PolicyVersion: e.policy.Version}, nil
+// A policy with no matching rule allows the hop. Findings on their own never
+// decide anything — only a rule does.
+func (e *Evaluator) Evaluate(_ context.Context, in core.EvalInput) (core.Decision, error) {
+	d := core.Decision{Action: core.ActionAllow, PolicyVersion: e.policy.Version}
+	var actions []core.Action
+	for _, rule := range e.policy.Rules {
+		matched, spans := rule.match(in)
+		if !matched {
+			continue
+		}
+		actions = append(actions, rule.Action)
+		if rule.TaintSession {
+			d.TaintSession = true
+		}
+		if rule.Action == core.ActionRedact {
+			d.Redactions = append(d.Redactions, spans...)
+		}
+	}
+	d.Action = core.MostSevere(actions...)
+	return d, nil
 }
 
 // OnError applies defaults.on_error (DESIGN §3.6).

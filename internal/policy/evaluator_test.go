@@ -1,7 +1,6 @@
 package policy
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -30,29 +29,6 @@ func TestOnError(t *testing.T) {
 				t.Errorf("policy version = %q, want v", got.PolicyVersion)
 			}
 		})
-	}
-}
-
-// Phase 0 keeps the evaluator a pass-through; rule matching is Phase 1.
-func TestEvaluateIsPassThrough(t *testing.T) {
-	p, err := LoadFile("testdata/example.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEvaluator(p)
-	got, err := e.Evaluate(context.Background(), core.EvalInput{
-		Request:        core.Request{Surface: core.SurfaceToolResult},
-		Findings:       []core.Finding{{Detector: "injection_heuristic"}},
-		SessionTainted: true,
-	})
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-	if got.Action != core.ActionAllow {
-		t.Errorf("action = %s, want allow", got.Action)
-	}
-	if got.PolicyVersion != p.Version {
-		t.Errorf("policy version = %q, want %q", got.PolicyVersion, p.Version)
 	}
 }
 

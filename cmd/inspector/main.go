@@ -15,6 +15,7 @@ import (
 	"github.com/rajesh-proddu/ai_security/internal/audit"
 	"github.com/rajesh-proddu/ai_security/internal/core"
 	"github.com/rajesh-proddu/ai_security/internal/detect"
+	"github.com/rajesh-proddu/ai_security/internal/normalize"
 	"github.com/rajesh-proddu/ai_security/internal/policy"
 	"github.com/rajesh-proddu/ai_security/internal/session"
 )
@@ -82,8 +83,10 @@ func run() error {
 		auditOut = f
 	}
 
-	// Phase 0 runs the no-op detector: the v1 set of DESIGN §3.3 lands in Phase 1.
-	registry, err := detect.NewRegistry(detect.Noop{})
+	// The fast set of DESIGN §3.3. The tenant dictionary and the URL allow-list
+	// have nowhere to be configured yet (see detect.CustomDict), so they are
+	// empty here and match nothing.
+	registry, err := detect.V1(nil, nil)
 	if err != nil {
 		return err
 	}
@@ -95,6 +98,7 @@ func run() error {
 		audit.NewJSONLSink(auditOut),
 		cfg.taintTTL,
 	)
+	pipeline.Normalizer = normalize.Normalizer{}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
