@@ -3,6 +3,7 @@
 
 # Local audit output
 *.jsonl
+!**/testdata/*.jsonl
 
 # Editor / OS
 .DS_Store
