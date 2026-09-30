@@ -95,16 +95,16 @@ Both default to `failClosed`, which matches the policy's `on_error: fail_closed`
 own pinning (`internal/core/pipeline.go` `checkPin`). With ExtMcp, pins are recorded from the `tools/list` result and checked on
 `tools/call`. `tools/call` doesn't carry the tool definition, so the adapter keys pins by session + service name + tool name.
 
-## Recommendation (decision needed)
+## Decision (accepted 2026-09-30, DESIGN v0.4)
 
-**LLM routes use ext_proc as configured. MCP routes use `mcpGuardrails` (ExtMcp), not ext_proc.**
+**LLM routes use ext_proc as configured. MCP routes use `mcpGuardrails` (ExtMcp), not ext_proc.** Session identity:
+`x-session-id` first on both paths (DESIGN §6 decision 2).
 
 - ExtMcp hands over exactly what the pipeline needs (method, tool name, arguments, result JSON, backend, session) with no
   SSE parsing, no request/response matching and no notification noise, and its pass / mutate / reject replies match
   `core.Verdict` directly.
 - Cost: ExtMcp is an agentgateway protocol, not an Envoy standard. That affects only this adapter; the LiteLLM path has no MCP hook either way (DESIGN §3.2).
-- If accepted: update DESIGN §3.2 ("ext_proc receives MCP context…" is not how the ext_proc path behaves), and change
-  `ai_platform`'s `mcp.policies` to:
+- Follow-up: DESIGN §3.2 is updated. Still to do: change `ai_platform`'s `mcp.policies` to:
 
 ```yaml
 mcpGuardrails:

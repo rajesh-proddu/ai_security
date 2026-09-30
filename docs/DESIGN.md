@@ -1,6 +1,10 @@
 # ai_security — Design
 
-Status: **Draft v0.3** (2026-09-18). No code yet. Phases are in [ROADMAP.md](ROADMAP.md).
+Status: **Draft v0.4** (2026-09-30). Phases are in [ROADMAP.md](ROADMAP.md).
+
+**v0.4 change:** the Phase 1 agentgateway spike ([spikes/agentgateway-extproc.md](spikes/agentgateway-extproc.md))
+moved MCP routes from ext_proc to agentgateway's MCP-aware `mcpGuardrails` hook (§3.2) and made `x-session-id`
+the first session key on both paths (§6 decision 2).
 
 **v0.2 change:** ai_security no longer builds its own proxies. It is the inspection, policy and evidence
 service that an agent gateway calls. The gateway (auth, routing, retries, provider adapters, MCP) is the one
@@ -40,7 +44,7 @@ policy and evidence trail. That cross-surface layer is the product.
   agentgateway adapter first; LiteLLM adapter proves the swap; a plain HTTP/SDK mode for agents with no gateway.
 - Actions per finding: **allow, flag (audit only), redact, block**.
 - **Cross-surface session taint**: findings on tool/RAG content change the decision on later tool calls in the same session.
-- **Tool-definition pinning** (rug-pull defence) — *unless the Phase 1 spike shows agentgateway already does it, in which case we consume its signal instead.*
+- **Tool-definition pinning** (rug-pull defence). The Phase 1 spike found agentgateway does not pin, so v1 does.
 - **Hybrid deployment**: customer-run inspection service, vendor-hosted control plane. Raw content stays in the customer environment (§3.7).
 - Latency (added by ai_security, including the gateway→service hop):
   - **fast path** (regex/validator/dictionary detectors): **p99 ≤ 20 ms**
@@ -67,7 +71,7 @@ policy and evidence trail. That cross-surface layer is the product.
  │                              │ agentgateway | LiteLLM  │     (Bedrock prod, vLLM local dev)    │
  │                              │ auth·routing·retries    │                                   │
  │                              └───────────┬─────────────┘                                   │
- │               ext_proc / webhook guard   │   guardrail API (pre/during/post_call)         │
+ │               ext_proc · mcpGuardrails   │   guardrail API (pre/during/post_call)         │
  │                                          ▼                                                 │
  │  agent ──SDK/HTTP (no gateway)──► ┌──────────────────────────────────────────────┐          │
  │                                   │ ai_security inspection service (Go)          │          │
@@ -105,13 +109,15 @@ Adapters translate a gateway's wire format into `Request` and a `Verdict` back i
 
 | Adapter | Gateway hook | Surfaces | Notes |
 |---|---|---|---|
-| **`agentgateway`** (v1 primary) | **ext_proc** (gRPC, Envoy protocol) on LLM routes and MCP routes; optionally the simpler **webhook prompt guard** on LLM routes | all four — ext_proc receives MCP context (tool name, arguments) and request/response bodies, streamed | ext_proc can return an immediate response from body phases (block) or a mutated body (redact). `failureMode` fail-open/closed configured on the gateway must match our policy default. |
+| **`agentgateway`** (v1 primary) | **LLM routes:** **ext_proc** (gRPC, Envoy protocol), body mode `fullDuplexStreamed`; optionally the simpler **webhook prompt guard**. **MCP routes:** **`mcpGuardrails`**, agentgateway's `ExtMcp` gRPC service. Both services share one listener. | all five: ext_proc carries the agent-facing LLM request and the streamed response; ExtMcp carries the MCP method, `params` and `result` as JSON, plus CEL-supplied `metadata_context` | ext_proc: block with an immediate response, redact with a streamed body mutation. In full-duplex mode every body chunk must be sent back, because a reply without a mutation empties the body. ExtMcp: pass / mutated / reject. Raw ext_proc on MCP routes sees SSE-framed JSON-RPC without the method on replies, so it is not used there. `failureMode: failClosed` on both hooks. |
 | **`litellm`** (v1, swap proof) | **Generic Guardrail API** — `pre_call` (input), `during_call` (input, concurrent with the LLM call), `post_call` (output) | input, output; tool results when agents send them as `tool` messages | `unreachable_fallback: fail_closed`. LiteLLM has no MCP tool-call hook in this path → tool-call and tool-result coverage is weaker; stated, not hidden. |
 | **`http`** | Plain JSON API + thin Python/Go SDK helpers | all four, when the agent calls it | For agents with no gateway, and for marking untrusted spans (§3.4). |
 
 **Replaceability requirement (from `ai_platform`):** the gateway choice is theirs and is not final
 (`ai_platform/study/README.md` item 6). The Phase 2 exit criterion is that the same e2e suite passes with
 agentgateway swapped for LiteLLM, with only gateway config changed — minus the MCP cases LiteLLM can't cover.
+`ExtMcp` is agentgateway's own protocol rather than an Envoy standard. That does not weaken the swap: the MCP
+cases are skipped on LiteLLM whichever hook agentgateway uses.
 
 Payload formats to parse, in order: **OpenAI Chat Completions** (the API agents send to the gateway,
 `ai_platform` HLD §5.1), then **MCP JSON-RPC** (`tools/call`, `tools/list`, `resources/read`), then
@@ -161,7 +167,10 @@ Detection alone is not sufficient, so the service also applies mitigations that 
 Buffering a whole response defeats streaming; forwarding unscanned tokens defeats DLP. With ext_proc in streamed
 body mode, the service holds back a sliding window (default 256 chars — longer than the longest v1 pattern),
 scans it, and releases the safe prefix, redacting inside the window. A `block` mid-stream ends the stream with an
-error event. Per route, policy can select `buffer_full` instead. Whether LiteLLM's guardrail API sees stream
+error event that the adapter writes itself (an SSE error event and `[DONE]`, with `end_of_stream`). An ext_proc
+immediate response after the headers are sent cuts the stream off with HTTP 200 and no error. Blocking does not
+cancel upstream generation: the remaining chunks still arrive, are answered empty, and their tokens are still
+spent. Per route, policy can select `buffer_full` instead. Whether LiteLLM's guardrail API sees stream
 chunks or only the assembled response is a **Phase 2 spike item**; if only the latter, streamed routes on LiteLLM
 get post-hoc flagging, not redaction.
 
@@ -221,11 +230,11 @@ only there. Events carry `trace_id` and `session_id` so later phases can reconst
 |---|---|---|
 | Direct prompt injection / jailbreak | `injection_heuristic` + `injection_ml` on input | Novel paraphrases; classifier FN rate |
 | Indirect injection via tool/RAG content | Scan results, session taint → block risky follow-up calls, spotlighting | Injections that steer answers without calling tools (e.g. ranking manipulation, §7); unmarked RAG text on the LLM path |
-| Tool poisoning / rug pull | Scan the `tool_definition` surface (`tools/list`), pin definition hashes | Malicious-but-approved tools |
+| Tool poisoning / rug pull | Scan the `tool_definition` surface (`tools/list`), pin definition hashes, remove blocked tools from the list, and block `tools/call` to any tool removed or failing its pin in that session (the gateway still routes calls to tools it no longer lists) | Malicious-but-approved tools |
 | Data exfiltration via tool args or output | `pii`/`secrets`/`custom_dict`/`exfil_url` + redact/block | Encoded or split-across-calls leakage |
 | Sensitive data sent to LLM providers | Input DLP with redaction before the gateway forwards | Unstructured PII until NER lands |
 | Bypass by calling providers/tools directly | Not enforceable by us — egress NetworkPolicy is a stated deployment requirement | Misconfigured egress |
-| Gateway misconfigured to fail open | Adapter reports gateway `failureMode` at startup; mismatch with policy default raises an alert | Operator overrides |
+| Gateway misconfigured to fail open | The gateway config sets `failureMode: failClosed` on both hooks; a check of that config belongs with the gateway's deployment, because neither protocol tells the inspector the gateway's setting. On LLM routes with `fullDuplexStreamed`, fail-open does not take effect on requests with a body. | Operator overrides on MCP routes |
 | Inspection service as a high-value target | Sees all content: minimal surface, no provider keys (the gateway holds them), mTLS gateway↔service, no content egress by default | Compromise of customer cluster |
 | Control plane pushing malicious policy | Signed bundles, pinned signing key, policy change audit | Signing key compromise |
 
@@ -233,7 +242,7 @@ only there. Events carry `trace_id` and `session_id` so later phases can reconst
 
 | Area | Choice | Why |
 |---|---|---|
-| Inspection service + adapters | Go | Low-latency hot path; Envoy ext_proc protos have mature Go bindings; same stack as the workspace's other services |
+| Inspection service + adapters | Go | Low-latency hot path; Envoy ext_proc protos have mature Go bindings, and agentgateway publishes generated Go for `ExtMcp`; same stack as the workspace's other services |
 | ML detector | Python (ONNX Runtime) behind gRPC, **CPU only** | Model ecosystem is Python; no GPU is funded (`ai_platform` HLD P2), and small classifiers run fine on CPU (`ai_platform/study/01`) |
 | Session store | Redis | Same choice as the `ai_platform` session scope; TTL-bounded taint and pin state |
 | Gateway | agentgateway (primary), LiteLLM (swap) | Chosen by `ai_platform`, not by us |
@@ -247,7 +256,7 @@ only there. Events carry `trace_id` and `session_id` so later phases can reconst
 | # | Question | Status | Decision |
 |---|---|---|---|
 | 1 | **ML model source** | **Decided** | Start with an **open-source prompt-injection classifier** (DeBERTa-class or smaller), run on CPU via ONNX. Candidates are chosen in Phase 2 by eval score on our corpus **and license**: this is a commercial product, so a permissive license (Apache-2.0/MIT) is required, and community-licensed models (e.g. Llama Prompt Guard) need a legal review first. Fine-tuning our own model is Phase 5, using opt-in labelled data. |
-| 2 | **Session identity** | **Decided** | `session_id` follows the `ai_platform` session scope (HLD §7.1). Resolution order: MCP `Mcp-Session-Id` on the tool path → `x-session-id` header on the LLM path (gateway forwards it to the adapter) → W3C `traceparent` trace id as fallback. Single-shot agents mint one per request, as the reference agent already does with `request_id`. End-user identity comes from the existing JWT (`utils/auth`), read by the gateway. |
+| 2 | **Session identity** | **Decided** | `session_id` follows the `ai_platform` session scope (HLD §7.1). Resolution order, the same on both paths: the agent's `x-session-id` header (ext_proc sees it among the request headers; on MCP routes the gateway passes it in `metadata_context.session`) → MCP `Mcp-Session-Id` → W3C `traceparent` trace id. `x-session-id` comes first because agentgateway mints its own `Mcp-Session-Id`, unrelated to the agent's session; keyed separately, taint from an injection on the LLM path would not block a tool call on the MCP path (revised in v0.4). Single-shot agents mint one per request, as the reference agent already does with `request_id`. End-user identity comes from the existing JWT (`utils/auth`), read by the gateway. |
 | 3 | **LLM providers first** | **Decided** | The gateway owns provider adapters. ai_security parses the agent-facing formats in §3.2 order: OpenAI Chat Completions → MCP → Anthropic Messages. Test matrix behind the gateway: **local vLLM (OpenAI-compatible server) for dev and e2e**, Bedrock for prod. vLLM local means no provider account, no token spend and no network in CI; on a CPU-only box that caps the lab at small models (`ai_platform/study/01`), which is fine because the detectors, not the model, are what the suite asserts on. |
 | 4 | **Regulated-data packs** | **Decided — India only for v1** | Detectors ship Aadhaar (Verhoeff), PAN, UPI VPA, IFSC + bank account, Indian mobile numbers, Indian passport, GSTIN, and card data (Luhn) — framed against **DPDP Act 2023** categories. US/EU packs (SSN, NI, GDPR special categories) are explicitly **not in v1**; the detector interface keeps them a pack, not a rewrite. |
 | 5 | **Control-plane content retention** | **Decided** | Metadata and hashes only; body capture opt-in per route with retention limits (§3.7). |
