@@ -122,7 +122,10 @@ cases are skipped on LiteLLM whichever hook agentgateway uses.
 Payload formats to parse, in order: **OpenAI Chat Completions** (the API agents send to the gateway,
 `ai_platform` HLD §5.1), then **MCP JSON-RPC** (`tools/call`, `tools/list`, `resources/read`), then
 **Anthropic Messages**. Provider-native formats behind the gateway (Bedrock Converse, Ollama) are the gateway's
-problem, not ours — we inspect on the agent-facing side.
+problem, not ours — we inspect on the agent-facing side. Until a format is parsed, any other JSON body on an LLM
+route (Anthropic messages, OpenAI responses and embeddings, Gemini, rerank) is still inspected: its prose fields
+go to `input` or `output` without roles, skipping ids, enums and base64 media. Otherwise an agent could avoid every
+input rule by calling a different endpoint on the same gateway.
 
 ### 3.3 Inspection pipeline
 

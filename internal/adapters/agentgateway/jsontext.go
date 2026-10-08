@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/rajesh-proddu/ai_security/internal/core"
 )
@@ -74,6 +75,59 @@ func stringLeaves(v any, out *[]textField) {
 		}
 	}
 }
+
+// opaqueKeys hold values that are not prose: identifiers, enums, model names,
+// base64 media and provider-signed blobs. They are skipped when a body is
+// walked without knowing its format, because ids and base64 trip the
+// high-entropy and encoded-payload detectors. Names cover the APIs agentgateway
+// serves on LLM routes (OpenAI chat, responses and embeddings; Anthropic
+// messages; Gemini generateContent; rerank).
+var opaqueKeys = map[string]bool{
+	"id": true, "object": true, "type": true, "role": true, "model": true,
+	"status": true, "finish_reason": true, "stop_reason": true, "finishReason": true,
+	"system_fingerprint": true, "service_tier": true, "encoding_format": true,
+	"tool_call_id": true, "tool_use_id": true, "call_id": true, "file_id": true,
+	"response_id": true, "previous_response_id": true,
+	"data": true, "b64_json": true, "media_type": true, "mime_type": true, "mimeType": true,
+	"signature": true, "thoughtSignature": true, "encrypted_content": true,
+}
+
+// textLeaves collects the prose in a body of unknown format: every string
+// under v except values of opaqueKeys and data: URIs, in sorted key order.
+func textLeaves(v any, out *[]textField) {
+	switch t := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if opaqueKeys[k] {
+				continue
+			}
+			if s, ok := t[k].(string); ok {
+				if isText(s) {
+					*out = append(*out, textField{text: s, set: func(n string) { t[k] = n }})
+				}
+				continue
+			}
+			textLeaves(t[k], out)
+		}
+	case []any:
+		for i := range t {
+			if s, ok := t[i].(string); ok {
+				if isText(s) {
+					*out = append(*out, textField{text: s, set: func(n string) { t[i] = n }})
+				}
+				continue
+			}
+			textLeaves(t[i], out)
+		}
+	}
+}
+
+func isText(s string) bool { return s != "" && !strings.HasPrefix(s, "data:") }
 
 // stringField returns the string at m[key] as a field, if there is one.
 func stringField(m map[string]any, key string) (textField, bool) {

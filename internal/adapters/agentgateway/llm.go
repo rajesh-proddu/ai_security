@@ -29,6 +29,13 @@ import (
 // block can still become a clean error response. Streaming (SSE) responses are
 // passed through chunk by chunk.
 //
+// OpenAI chat completions are parsed by message, keeping roles and marking
+// `tool` messages untrusted. Every other JSON body on the route (Anthropic
+// messages, OpenAI responses and embeddings, Gemini, rerank) is inspected
+// without parsing its format: its prose fields go to input or output, skipping
+// ids, enums and base64 media (see textLeaves). Otherwise an agent could avoid
+// every input rule by calling a different endpoint on the same gateway.
+//
 // TODO(phase-2): window redaction for streaming responses (DESIGN §3.5).
 type LLM struct {
 	extproc.UnimplementedExternalProcessorServer
@@ -104,7 +111,7 @@ func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.Processing
 
 	case *extproc.ProcessingRequest_ResponseHeaders:
 		h := headerMap(r.ResponseHeaders.GetHeaders())
-		st.inspectResponse = !r.ResponseHeaders.GetEndOfStream() && isChat(st.path) && success(h[":status"]) && isJSON(h["content-type"])
+		st.inspectResponse = !r.ResponseHeaders.GetEndOfStream() && success(h[":status"]) && isJSON(h["content-type"])
 		if st.inspectResponse {
 			st.heldHeaders = true
 			return nil, false, nil
@@ -146,16 +153,16 @@ func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.Processing
 
 // inspectRequest inspects a chat completions request: the conversation on the
 // input surface, and any `tool` messages — tool results the agent passes back —
-// on the tool_result surface (DESIGN §3.4). Other bodies are sent back as they
-// came.
+// on the tool_result surface (DESIGN §3.4). Any other JSON body is inspected as
+// input without parsing its format.
 func (l *LLM) inspectRequest(ctx context.Context, st *llmStream) ([]byte, bool, error) {
-	if !isChat(st.path) {
-		return st.reqBody, false, nil
-	}
 	v, err := decodeJSON(st.reqBody)
 	if err != nil {
 		// Not ours to reject: the gateway answers malformed bodies itself.
 		return st.reqBody, false, nil
+	}
+	if !isChat(st.path) {
+		return l.inspectAny(ctx, st, core.SurfaceInput, v, st.reqBody)
 	}
 	chat, _ := v.(map[string]any)
 	messages, _ := chat["messages"].([]any)
@@ -216,11 +223,15 @@ func (l *LLM) inspectRequest(ctx context.Context, st *llmStream) ([]byte, bool, 
 }
 
 // inspectResponse inspects the assistant text of a chat completions response
-// on the output surface.
+// on the output surface, and any other JSON response without parsing its
+// format.
 func (l *LLM) inspectResponse(ctx context.Context, st *llmStream) ([]byte, bool, error) {
 	v, err := decodeJSON(st.respBody)
 	if err != nil {
 		return st.respBody, false, nil
+	}
+	if !isChat(st.path) {
+		return l.inspectAny(ctx, st, core.SurfaceOutput, v, st.respBody)
 	}
 	resp, _ := v.(map[string]any)
 	choices, _ := resp["choices"].([]any)
@@ -254,6 +265,40 @@ func (l *LLM) inspectResponse(ctx context.Context, st *llmStream) ([]byte, bool,
 		}
 	}
 	return st.respBody, false, nil
+}
+
+// inspectAny inspects a JSON body of a format we do not parse: its prose
+// fields, one part each, with the model as the source when the body names one.
+// raw is returned unchanged unless a redaction applies.
+func (l *LLM) inspectAny(ctx context.Context, st *llmStream, surface core.Surface, v any, raw []byte) ([]byte, bool, error) {
+	var fields []textField
+	textLeaves(v, &fields)
+	if len(fields) == 0 {
+		return raw, false, nil
+	}
+	model := ""
+	if m, ok := v.(map[string]any); ok {
+		model, _ = m["model"].(string)
+	}
+	verdict, err := l.Inspector.Inspect(ctx, core.Request{
+		Surface: surface,
+		Session: st.session,
+		Source:  model,
+		Parts:   parts(fields, "", core.TrustTrusted),
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	switch verdict.Action {
+	case core.ActionBlock:
+		return nil, true, nil
+	case core.ActionRedact:
+		if redactFields(fields, verdict.Redactions) {
+			b, err := encodeJSON(v)
+			return b, false, err
+		}
+	}
+	return raw, false, nil
 }
 
 // messageText returns a chat message's text: `content` as a string, or the

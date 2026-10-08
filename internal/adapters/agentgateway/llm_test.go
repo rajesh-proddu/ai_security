@@ -299,25 +299,13 @@ func TestLLMToolMessagesAreToolResults(t *testing.T) {
 	}
 }
 
-// Anything that is not a chat completion, and any error response, goes back
-// untouched and uninspected.
-func TestLLMPassesThroughOtherTraffic(t *testing.T) {
+// Error responses and malformed bodies go back untouched and uninspected; the
+// gateway answers a malformed request itself.
+func TestLLMPassesThroughErrorsAndMalformedBodies(t *testing.T) {
 	rec := &recorder{}
 	c := extproc.NewExternalProcessorClient(dial(t, rec))
-	embed := `{"model":"e","input":"4111 1111 1111 1111"}`
-	replies := exchange(t, c, []*extproc.ProcessingRequest{
-		reqHeaders("/v1/embeddings", "s1"), reqBody(embed, true),
-		respHeaders("200", "application/json"), respBody(`{"data":[]}`, true),
-	})
-	if kinds(replies) != "reqH,reqB,respH,respB" {
-		t.Fatalf("replies = %s", kinds(replies))
-	}
-	if b, _, _ := bodyOf(replies[1]); string(b) != embed {
-		t.Errorf("embeddings body changed: %s", b)
-	}
-
 	errBody := `{"error":{"message":"LLM request body must be valid JSON"}}`
-	replies = exchange(t, c, []*extproc.ProcessingRequest{
+	replies := exchange(t, c, []*extproc.ProcessingRequest{
 		reqHeaders("/v1/chat/completions", "s1"), reqBody(`not json`, true),
 		respHeaders("400", "application/json"), respBody(errBody, true),
 	})
@@ -329,5 +317,88 @@ func TestLLMPassesThroughOtherTraffic(t *testing.T) {
 	}
 	if n := len(rec.requests()); n != 0 {
 		t.Errorf("%d inspections, want none", n)
+	}
+}
+
+// Endpoints other than chat completions are inspected without parsing their
+// format: prose is found, ids and base64 media are not.
+func TestLLMInspectsOtherEndpoints(t *testing.T) {
+	const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+	tests := []struct {
+		name, path, body string
+		want             []string // substrings of the body sent upstream
+	}{
+		{
+			name: "anthropic messages",
+			path: "/v1/messages",
+			body: `{"model":"claude","max_tokens":64,"system":"be brief","messages":[{"role":"user","content":[` +
+				`{"type":"text","text":"card 4111 1111 1111 1111"},` +
+				`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + image + `"}},` +
+				`{"type":"thinking","thinking":"ok","signature":"EuYBCkQYAiJAx0d9QPm1sVNtiwVKe3ZpfQ5tQ4yGwqB8oVgE"}]}]}`,
+			want: []string{`"text":"card [REDACTED]"`, `"data":"` + image + `"`, `"signature":"EuYBCkQYAiJAx0d9QPm1sVNtiwVKe3ZpfQ5tQ4yGwqB8oVgE"`},
+		},
+		{
+			name: "openai responses",
+			path: "/v1/responses",
+			body: `{"model":"gpt","previous_response_id":"resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b","input":[{"role":"user","content":[{"type":"input_text","text":"card 4111 1111 1111 1111"},{"type":"input_image","image_url":"data:image/png;base64,` + image + `"}]}]}`,
+			want: []string{`"text":"card [REDACTED]"`, `"image_url":"data:image/png;base64,` + image + `"`},
+		},
+		{
+			name: "embeddings",
+			path: "/v1/embeddings",
+			body: `{"model":"e","input":["card 4111 1111 1111 1111","plain"]}`,
+			want: []string{`"input":["card [REDACTED]","plain"]`},
+		},
+		{
+			name: "gemini",
+			path: "/v1beta/models/gemini-pro:generateContent",
+			body: `{"contents":[{"role":"user","parts":[{"text":"card 4111 1111 1111 1111"},{"inlineData":{"mimeType":"image/png","data":"` + image + `"}}]}]}`,
+			want: []string{`"text":"card [REDACTED]"`, `"data":"` + image + `"`},
+		},
+	}
+	c := extproc.NewExternalProcessorClient(dial(t, pipeline(t, llmPolicy)))
+	for _, tt := range tests {
+		replies := exchange(t, c, []*extproc.ProcessingRequest{reqHeaders(tt.path, "s1"), reqBody(tt.body, true)})
+		if kinds(replies) != "reqH,reqB" {
+			t.Errorf("%s: replies = %s", tt.name, kinds(replies))
+			continue
+		}
+		got, _, _ := bodyOf(replies[1])
+		if !json.Valid(got) {
+			t.Errorf("%s: not valid JSON: %s", tt.name, got)
+		}
+		for _, w := range tt.want {
+			if !strings.Contains(string(got), w) {
+				t.Errorf("%s: body lacks %s\n%s", tt.name, w, got)
+			}
+		}
+	}
+}
+
+// A clean response with provider ids passes untouched; a secret in another
+// endpoint's response is blocked like a chat one.
+func TestLLMOtherEndpointResponses(t *testing.T) {
+	c := extproc.NewExternalProcessorClient(dial(t, pipeline(t, llmPolicy)))
+	clean := `{"id":"msg_01XFDUDYJgAACzvnptvVoYEL","type":"message","role":"assistant","model":"claude",` +
+		`"content":[{"type":"text","text":"Here is the summary."}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
+	replies := exchange(t, c, []*extproc.ProcessingRequest{
+		reqHeaders("/v1/messages", "s1"), reqBody(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`, true),
+		respHeaders("200", "application/json"), respBody(clean, true),
+	})
+	if kinds(replies) != "reqH,reqB,respH,respB" {
+		t.Fatalf("clean response: replies = %s", kinds(replies))
+	}
+	if b, _, _ := bodyOf(replies[3]); string(b) != clean {
+		t.Errorf("clean response changed: %s", b)
+	}
+
+	leaky := `{"id":"resp_67cc","object":"response","output":[{"type":"message","id":"msg_67cc","role":"assistant",` +
+		`"content":[{"type":"output_text","text":"use AKIAIOSFODNN7EXAMPLE"}]}]}`
+	replies = exchange(t, c, []*extproc.ProcessingRequest{
+		reqHeaders("/v1/responses", "s1"), reqBody(`{"model":"gpt","input":"hi"}`, true),
+		respHeaders("200", "application/json"), respBody(leaky, true),
+	})
+	if kinds(replies) != "reqH,reqB,immediate" {
+		t.Errorf("leaky response: replies = %s, want a block", kinds(replies))
 	}
 }
