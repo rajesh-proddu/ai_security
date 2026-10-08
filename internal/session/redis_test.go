@@ -124,6 +124,15 @@ func TestRedisMatchesMemorySemantics(t *testing.T) {
 			if h, ok, _ := s.ToolPin(ctx, "fresh", "t"); !ok || h != "h" {
 				t.Errorf("pin = %q, ok = %v", h, ok)
 			}
+			if blocked, err := s.ToolBlocked(ctx, "fresh", "t"); err != nil || blocked {
+				t.Errorf("unset block: blocked = %v, err = %v", blocked, err)
+			}
+			if err := s.BlockTool(ctx, "fresh", "t", time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if blocked, _ := s.ToolBlocked(ctx, "fresh", "t"); !blocked {
+				t.Error("block did not stick")
+			}
 		})
 	}
 }

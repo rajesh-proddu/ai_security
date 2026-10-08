@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,7 +14,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc"
 
+	"github.com/rajesh-proddu/ai_security/internal/adapters/agentgateway"
 	httpadapter "github.com/rajesh-proddu/ai_security/internal/adapters/http"
 	"github.com/rajesh-proddu/ai_security/internal/audit"
 	"github.com/rajesh-proddu/ai_security/internal/core"
@@ -25,6 +28,7 @@ import (
 
 type config struct {
 	addr        string
+	grpcAddr    string
 	redisAddr   string
 	policyFile  string
 	auditFile   string
@@ -35,6 +39,7 @@ type config struct {
 func loadConfig() (config, error) {
 	c := config{
 		addr:        env("ADDR", ":8080"),
+		grpcAddr:    env("GRPC_ADDR", ":9000"),
 		redisAddr:   os.Getenv("REDIS_ADDR"),
 		policyFile:  os.Getenv("POLICY_FILE"),
 		auditFile:   os.Getenv("AUDIT_FILE"),
@@ -133,17 +138,33 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// agentgateway's two hooks, ext_proc (LLM routes) and ExtMcp (MCP routes),
+	// share one gRPC listener (DESIGN §3.2; port contract in ai_platform
+	// gateway/README.md).
+	grpcSrv := grpc.NewServer(agentgateway.ServerOptions()...)
+	agentgateway.Register(grpcSrv, pipeline)
+	lis, err := net.Listen("tcp", cfg.grpcAddr)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
 	go func() {
 		log.Printf("inspector listening on %s (tenant=%q policy_version=%s)", cfg.addr, pol.Tenant, pol.Version)
 		errc <- srv.ListenAndServe()
 	}()
+	go func() {
+		log.Printf("inspector gRPC (ext_proc, ExtMcp) listening on %s", cfg.grpcAddr)
+		errc <- grpcSrv.Serve(lis)
+	}()
 
 	select {
 	case err := <-errc:
+		grpcSrv.Stop()
+		_ = srv.Close()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -152,6 +173,14 @@ func run() error {
 		log.Print("inspector shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTTL)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		stopped := make(chan struct{})
+		go func() { grpcSrv.GracefulStop(); close(stopped) }()
+		err := srv.Shutdown(shutdownCtx)
+		select {
+		case <-stopped:
+		case <-shutdownCtx.Done():
+			grpcSrv.Stop()
+		}
+		return err
 	}
 }

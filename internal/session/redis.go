@@ -14,7 +14,7 @@ import (
 // cannot do.
 //
 // Keys are namespaced and TTL-bounded. Nothing here stores content — a taint
-// key holds no value at all, and a pin holds a hash.
+// or blocked-tool key holds a placeholder, and a pin holds a hash.
 type Redis struct {
 	client redis.UniversalClient
 	prefix string
@@ -37,6 +37,10 @@ func (r *Redis) taintKey(session string) string {
 
 func (r *Redis) pinKey(session, tool string) string {
 	return fmt.Sprintf("%s:pin:{%s}:%s", r.prefix, session, tool)
+}
+
+func (r *Redis) blockedKey(session, tool string) string {
+	return fmt.Sprintf("%s:blocked:{%s}:%s", r.prefix, session, tool)
 }
 
 func (r *Redis) Tainted(ctx context.Context, session string) (bool, error) {
@@ -74,6 +78,24 @@ func (r *Redis) PinTool(ctx context.Context, session, tool, hash string, ttl tim
 	}
 	if err := r.client.Set(ctx, r.pinKey(session, tool), hash, ttl).Err(); err != nil {
 		return fmt.Errorf("session: pin tool: %w", err)
+	}
+	return nil
+}
+
+func (r *Redis) ToolBlocked(ctx context.Context, session, tool string) (bool, error) {
+	n, err := r.client.Exists(ctx, r.blockedKey(session, tool)).Result()
+	if err != nil {
+		return false, fmt.Errorf("session: tool blocked: %w", err)
+	}
+	return n > 0, nil
+}
+
+func (r *Redis) BlockTool(ctx context.Context, session, tool string, ttl time.Duration) error {
+	if ttl < 0 {
+		ttl = 0
+	}
+	if err := r.client.Set(ctx, r.blockedKey(session, tool), "1", ttl).Err(); err != nil {
+		return fmt.Errorf("session: block tool: %w", err)
 	}
 	return nil
 }

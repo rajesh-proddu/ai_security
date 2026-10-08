@@ -88,3 +88,31 @@ func TestMemoryToolPins(t *testing.T) {
 		t.Error("an expired pin must not be returned")
 	}
 }
+
+func TestMemoryBlockedTools(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return clock }
+
+	if blocked, err := m.ToolBlocked(ctx, "s1", "email.send"); err != nil || blocked {
+		t.Fatalf("unblocked tool: blocked = %v, err = %v", blocked, err)
+	}
+	if err := m.BlockTool(ctx, "s1", "email.send", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _ := m.ToolBlocked(ctx, "s1", "email.send"); !blocked {
+		t.Fatal("block did not stick")
+	}
+	if blocked, _ := m.ToolBlocked(ctx, "s2", "email.send"); blocked {
+		t.Error("a block must not leak across sessions")
+	}
+	if blocked, _ := m.ToolBlocked(ctx, "s1", "email.read"); blocked {
+		t.Error("a block must not leak across tools")
+	}
+
+	clock = clock.Add(2 * time.Minute)
+	if blocked, _ := m.ToolBlocked(ctx, "s1", "email.send"); blocked {
+		t.Error("an expired block must not be returned")
+	}
+}

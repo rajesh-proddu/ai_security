@@ -16,17 +16,28 @@
 //   - ExtMcp: crates/protos/proto/ext_mcp.proto in https://github.com/agentgateway/agentgateway
 package agentgateway
 
-import "github.com/rajesh-proddu/ai_security/internal/core"
+import (
+	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"google.golang.org/grpc"
 
-// Processor is the Phase 1 gRPC server for both protocols.
-//
-// TODO(phase-1): give Processor the ExternalProcessor and ExtMcp server
-// methods, mapping each ext_proc stream phase and each MCP method to a
-// core.Surface, and each core.Verdict to a streamed body mutation or immediate
-// response (ext_proc) or a pass / mutated / reject result (ExtMcp).
-type Processor struct {
-	Inspector core.Inspector
+	"github.com/rajesh-proddu/ai_security/internal/adapters/agentgateway/extmcppb"
+	"github.com/rajesh-proddu/ai_security/internal/core"
+)
+
+// MaxMessageSize bounds one gRPC message. ExtMcp sends a whole tools/call or
+// resources/read result in a single message, and gRPC's 4 MiB default would
+// reject a large one (an image, a long document); the gateway then fails the
+// call closed. Request and response bodies on the LLM route are buffered up to
+// end of stream, so this does not bound those.
+const MaxMessageSize = 32 << 20
+
+// ServerOptions are the gRPC server options the two protocols need.
+func ServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{grpc.MaxRecvMsgSize(MaxMessageSize), grpc.MaxSendMsgSize(MaxMessageSize)}
 }
 
-// New returns a Processor over the given inspector.
-func New(in core.Inspector) *Processor { return &Processor{Inspector: in} }
+// Register serves both protocols on s.
+func Register(s *grpc.Server, in core.Inspector) {
+	extproc.RegisterExternalProcessorServer(s, NewLLM(in))
+	extmcppb.RegisterExtMcpServer(s, NewMCP(in))
+}

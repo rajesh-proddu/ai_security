@@ -16,6 +16,7 @@ services:
       # POLICY_FILE: /etc/ai_security/policy.yaml
     ports:
       - "8080:8080"
+      - "9000:9000" # gRPC: ext_proc + ExtMcp
     # No compose healthcheck: the distroless image has no shell and no curl, so
     # probing /healthz needs either a -healthcheck flag on the binary or a
     # different base image. TODO(phase-1): pick one when the gateway needs to

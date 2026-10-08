@@ -12,5 +12,5 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inspector ./cmd/in
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/inspector /inspector
 USER nonroot:nonroot
-EXPOSE 8080
+EXPOSE 8080 9000
 ENTRYPOINT ["/inspector"]

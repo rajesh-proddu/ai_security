@@ -120,6 +120,11 @@ func (p *Pipeline) Inspect(ctx context.Context, req Request) (Verdict, error) {
 		return p.fail(ctx, original, EvalInput{Request: original}, err, start)
 	}
 
+	toolBlocked, err := p.toolBlocked(ctx, original)
+	if err != nil {
+		return p.fail(ctx, original, EvalInput{Request: original}, err, start)
+	}
+
 	// Detector spans are in normalized offsets and are mapped back; normalizer
 	// findings are already in original offsets.
 	detected, err := p.Detectors.Detect(ctx, req)
@@ -142,7 +147,11 @@ func (p *Pipeline) Inspect(ctx context.Context, req Request) (Verdict, error) {
 		TaintSession:  decision.TaintSession,
 		PolicyVersion: decision.PolicyVersion,
 	}
-	if decision.Action == ActionRedact {
+	if toolBlocked {
+		verdict.Action = ActionBlock
+		verdict.Findings = append(verdict.Findings, Finding{Detector: DetectorToolState, Type: TypeToolBlocked})
+	}
+	if verdict.Action == ActionRedact {
 		verdict.Redactions = MergeSpans(decision.Redactions)
 	}
 
@@ -152,8 +161,31 @@ func (p *Pipeline) Inspect(ctx context.Context, req Request) (Verdict, error) {
 		}
 	}
 
+	if verdict.Action == ActionBlock && req.Surface == SurfaceToolDefinition && req.Session != "" && req.Source != "" {
+		if err := p.Sessions.BlockTool(ctx, req.Session, req.Source, p.TaintTTL); err != nil {
+			return p.fail(ctx, original, in, err, start)
+		}
+	}
+
 	p.emit(ctx, original, verdict, start, nil)
 	return verdict, nil
+}
+
+// Blocked tools (DESIGN §4): removing a tool from `tools/list` does not stop
+// an agent calling it, because the gateway still routes calls to tools it no
+// longer lists. So a blocked tool_definition marks the tool for the session,
+// and a later tool_call to it is blocked whatever the rules say. Pin drift
+// reaches this through the pin_changed rule, which blocks the definition.
+const (
+	DetectorToolState = "tool_state"
+	TypeToolBlocked   = "tool_blocked"
+)
+
+func (p *Pipeline) toolBlocked(ctx context.Context, req Request) (bool, error) {
+	if req.Surface != SurfaceToolCall || req.Session == "" || req.Source == "" {
+		return false, nil
+	}
+	return p.Sessions.ToolBlocked(ctx, req.Session, req.Source)
 }
 
 // checkPin implements tool-definition pinning (DESIGN §4): the first definition

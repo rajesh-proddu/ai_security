@@ -317,3 +317,52 @@ func TestPipelineIgnoresPinsOnOtherSurfaces(t *testing.T) {
 		t.Fatal("only tool_definition requests may pin")
 	}
 }
+
+func TestPipelineBlockedToolDefinitionBlocksLaterCalls(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewMemory()
+	eval := &stubEvaluator{decision: Decision{Action: ActionBlock}}
+	sink := &stubSink{}
+	p := NewPipeline(stubDetectors{}, eval, store, sink, time.Hour)
+
+	def := Request{Surface: SurfaceToolDefinition, Session: "s1", Source: "email.send", Parts: []Part{{Text: "poisoned"}}}
+	if v, _ := p.Inspect(ctx, def); v.Action != ActionBlock {
+		t.Fatalf("definition: action = %s, want block", v.Action)
+	}
+
+	// The policy now allows everything; the call is still blocked.
+	eval.decision = Decision{Action: ActionAllow}
+	call := Request{Surface: SurfaceToolCall, Session: "s1", Source: "email.send", Parts: []Part{{Text: "{}"}}}
+	v, err := p.Inspect(ctx, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Action != ActionBlock {
+		t.Fatalf("call to blocked tool: action = %s, want block", v.Action)
+	}
+	last := sink.events[len(sink.events)-1]
+	if len(last.Findings) != 1 || last.Findings[0].Type != TypeToolBlocked {
+		t.Errorf("audit findings = %+v, want one %s", last.Findings, TypeToolBlocked)
+	}
+
+	for _, other := range []Request{
+		{Surface: SurfaceToolCall, Session: "s1", Source: "email.read"},
+		{Surface: SurfaceToolCall, Session: "s2", Source: "email.send"},
+	} {
+		if v, _ := p.Inspect(ctx, other); v.Action != ActionAllow {
+			t.Errorf("%s in %s: action = %s, want allow", other.Source, other.Session, v.Action)
+		}
+	}
+}
+
+func TestPipelineAllowedDefinitionDoesNotBlockTool(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewMemory()
+	p := NewPipeline(stubDetectors{}, &stubEvaluator{decision: Decision{Action: ActionFlag}}, store, &stubSink{}, time.Hour)
+	if _, err := p.Inspect(ctx, Request{Surface: SurfaceToolDefinition, Session: "s1", Source: "email.send"}); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _ := store.ToolBlocked(ctx, "s1", "email.send"); blocked {
+		t.Fatal("only a blocked definition may block the tool")
+	}
+}
