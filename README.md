@@ -17,14 +17,15 @@ detectors, the policy evaluator and the gateway adapters are stubs. Every hop is
 
 | Path | What it is |
 |---|---|
-| `cmd/inspector` | The data-plane service: `/healthz` plus the `http` adapter |
+| `cmd/inspector` | The data-plane service: HTTP (`/healthz`, `http` adapter) on `:8080`, gRPC (agentgateway ext_proc + ExtMcp) on `:9000` |
 | `internal/core` | Gateway-neutral `Inspect(ctx, Request) (Verdict, error)` and the pipeline that wires the stages |
 | `internal/detect` | `Detector` interface, registry, and the v1 detector / finding-type vocabulary |
 | `internal/policy` | The YAML policy of DESIGN §3.6, its loader, and the evaluator |
-| `internal/session` | Cross-surface taint and tool-definition pins (in-memory; Redis in Phase 1) |
+| `internal/session` | Cross-surface taint, tool-definition pins and blocked tools (in-memory, or Redis with `REDIS_ADDR`) |
 | `internal/audit` | Metadata-and-hashes-only event and a JSON-lines sink |
-| `internal/adapters/{agentgateway,litellm,http}` | Wire-format adapters; only `http` is implemented |
-| `deploy/e2e` | Skeleton for the Phase 1 e2e stack |
+| `internal/adapters/{agentgateway,litellm,http}` | Wire-format adapters; `agentgateway` and `http` are implemented, `litellm` is Phase 2 |
+| `deploy/e2e` | Phase 1 e2e stack: ai_platform's gateway stack + this inspector + a sample MCP server ([README](deploy/e2e/README.md)) |
+| `test/e2e` | The e2e suite (`-tags e2e`; `make e2e-up e2e`) |
 
 ## Develop
 

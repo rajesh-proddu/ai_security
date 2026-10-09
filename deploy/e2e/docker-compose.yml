@@ -1,60 +1,40 @@
-# Phase 1 e2e stack — SKELETON. See README.md before using.
+# Phase 1 e2e stack: ai_platform's local stack (agentgateway, vLLM, Redis), with
+# this repo's inspection service added and the sample MCP server swapped for
+# ours. See README.md.
 #
-# Only `inspector` is verified and runs by default. The other three services are
-# behind the `gateway` profile because their images and configuration are not
-# settled yet (the gateway config is owned by the ai_platform repo).
+# The gateway stack is consumed, not copied (ROADMAP "Cross-repo
+# dependencies"): ai_platform must be checked out next to this repo. Its
+# gateway config points both hooks at `ai-security-inspector:9000` and its MCP
+# target at `mcp-everything:3001/mcp`, so the service names below are a
+# contract.
 
 name: ai-security-e2e
 
+include:
+  - path:
+      - ../../../ai_platform/deploy/local/docker-compose.yml
+      # Replaces the sample MCP server with ours; see the file.
+      - ./ai-platform.override.yml
+
 services:
-  inspector:
+  ai-security-inspector:
     build:
       context: ../..
       dockerfile: Dockerfile
+    image: ai-security/inspector:e2e
     environment:
       ADDR: ":8080"
-      # POLICY_FILE: /etc/ai_security/policy.yaml
-    ports:
-      - "8080:8080"
-      - "9000:9000" # gRPC: ext_proc + ExtMcp
-    # No compose healthcheck: the distroless image has no shell and no curl, so
-    # probing /healthz needs either a -healthcheck flag on the binary or a
-    # different base image. TODO(phase-1): pick one when the gateway needs to
-    # depend on this service being ready.
-
-  # TODO(phase-1): the agentgateway config (LLM + MCP routes, ext_proc pointing
-  # at inspector:8080, failureMode) comes from ai_platform P0 — ROADMAP
-  # "Cross-repo dependencies". Until it lands, a temporary local config lives
-  # here and is deleted when ai_platform ships its own.
-  # Image and config schema are NOT verified: https://agentgateway.dev/docs/
-  agentgateway:
-    profiles: ["gateway"]
-    image: "" # TODO(phase-1): pin the agentgateway image and tag
-    depends_on:
-      - inspector
-      - vllm
-      - mcp-sample
-    ports:
-      - "8081:8080"
+      GRPC_ADDR: ":9000"
+      REDIS_ADDR: "redis:6379"
+      POLICY_FILE: /etc/ai_security/policy.yaml
+      # Audit events go to stdout; the e2e suite reads them with
+      # `docker compose logs`. (A bind-mounted file is not writable by the
+      # image's nonroot user.)
     volumes:
-      - ./gateway:/etc/agentgateway:ro # TODO(phase-1): config file, mount path unverified
-
-  # Local OpenAI-compatible model server: no provider account, no token spend,
-  # no network in CI (DESIGN decision 3). The suite asserts on the detectors,
-  # not on model quality, so a small model is fine.
-  vllm:
-    profiles: ["gateway"]
-    image: "" # TODO(phase-1): pin a CPU-capable vLLM image; the default vllm/vllm-openai
-      # image expects a GPU and this lab is CPU-only.
-    command: [] # TODO(phase-1): --model <small model>, served on :8000
+      - ./policy.yaml:/etc/ai_security/policy.yaml:ro
     ports:
-      - "8000:8000"
-
-  # Stands in for MCP tools until an MCP-based agent exists (DESIGN §7). It must
-  # expose a tools/list and a tools/call, including a "poisoned" tool
-  # description and a high-risk tool (e.g. email.send) for the taint cases.
-  mcp-sample:
-    profiles: ["gateway"]
-    image: "" # TODO(phase-1): build a small MCP server in this repo, or pin a sample image
-    ports:
-      - "8090:8090"
+      - "8080:8080" # HTTP: /healthz, /v1/inspect
+      - "9000:9000" # gRPC: ext_proc + ExtMcp (exposed for the latency check)
+    depends_on:
+      redis:
+        condition: service_healthy
