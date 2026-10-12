@@ -1,0 +1,14 @@
+# Build output
+/bin/
+
+# Local audit output
+*.jsonl
+!**/testdata/*.jsonl
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Local env overrides — never commit credentials
+.env
+.env.local

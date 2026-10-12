@@ -1,0 +1,11 @@
+# Override applied to ai_platform's deploy/local/docker-compose.yml.
+#
+# ai_platform's sample MCP server (@modelcontextprotocol/server-everything) has
+# no poisoned tool and no high-risk tool, so two Phase 1 exit criteria could not
+# be shown with it. The service keeps its name, port and path, so the gateway
+# config is unchanged and the route stays single-target; only the image differs.
+# The image is built from ./mcp-sample (`make e2e-up`).
+services:
+  mcp-everything:
+    image: ai-security/mcp-sample:e2e
+    command: ["-addr", ":3001"]

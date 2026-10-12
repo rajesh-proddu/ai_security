@@ -1,0 +1,102 @@
+{
+  "fast": {
+    "cases": 51,
+    "negatives": 14,
+    "fp_rate": 0,
+    "per_detector": {
+      "custom_dict": {
+        "tp": 2,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "exfil_url": {
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "injection_heuristic": {
+        "tp": 18,
+        "fp": 0,
+        "fn": 2,
+        "precision": 1,
+        "recall": 0.9,
+        "f1": 0.9474
+      },
+      "pii": {
+        "tp": 16,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "secrets": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      }
+    },
+    "per_case": {
+      "clean-long-output-negative": true,
+      "custom-dict-absent-negative": true,
+      "custom-dict-case-insensitive": true,
+      "custom-dict-codename": true,
+      "exfil-allowed-domain-negative": true,
+      "exfil-data-bearing-query": true,
+      "exfil-disallowed-domain": true,
+      "exfil-markdown-image": true,
+      "exfil-ordinary-link-negative": true,
+      "injection-base64-payload": true,
+      "injection-double-encoded-known-gap": false,
+      "injection-entity-evasion": true,
+      "injection-fullwidth-evasion": true,
+      "injection-html-comment": true,
+      "injection-ignore-previous": true,
+      "injection-new-instructions": true,
+      "injection-ordinary-use-negative": true,
+      "injection-paraphrase-known-gap": false,
+      "injection-percent-evasion": true,
+      "injection-role-spoof-template": true,
+      "injection-security-prose-negative": true,
+      "injection-zero-width-evasion": true,
+      "mixed-output-leak": true,
+      "pii-aadhaar-bad-checksum-negative": true,
+      "pii-aadhaar-plain": true,
+      "pii-aadhaar-spaced": true,
+      "pii-account-without-ifsc-negative": true,
+      "pii-card-bad-luhn-negative": true,
+      "pii-card-luhn": true,
+      "pii-card-suppresses-mobile": true,
+      "pii-card-zero-width-split": true,
+      "pii-email-not-vpa": true,
+      "pii-gstin": true,
+      "pii-ifsc-and-account": true,
+      "pii-mobile": true,
+      "pii-pan": true,
+      "pii-passport": true,
+      "pii-prose-negative": true,
+      "pii-upi-vpa": true,
+      "reco-agent-clean-result-negative": true,
+      "reco-agent-ranking-manipulation": true,
+      "secrets-aws-key": true,
+      "secrets-entropy-unknown-format": true,
+      "secrets-github-token": true,
+      "secrets-hex-digest-negative": true,
+      "secrets-openai-key": true,
+      "secrets-prose-negative": true,
+      "secrets-slack-token": true,
+      "tool-call-json-arguments-pii": true,
+      "tool-definition-clean-negative": true,
+      "tool-definition-poisoned": true
+    }
+  }
+}

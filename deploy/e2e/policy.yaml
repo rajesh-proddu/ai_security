@@ -1,0 +1,29 @@
+# Policy for the Phase 1 e2e suite (ROADMAP Phase 1 exit criteria).
+tenant: e2e
+defaults: { on_error: fail_closed }
+rules:
+  # PII in prompts, outputs, tool arguments and tool results is redacted.
+  - surface: [input, output, tool_call, tool_result]
+    when: { detector: pii, type_in: [card, aadhaar] }
+    action: redact
+  # Credentials never reach the model or the user.
+  - surface: [input, output]
+    when: { detector: secrets }
+    action: block
+  # Injected tool or RAG content is flagged and taints the session, on either
+  # path: MCP tool results, and `tool` messages on the LLM route.
+  - surface: [tool_result]
+    when: { detector: injection_heuristic }
+    action: flag
+    taint_session: true
+  # Poisoned or changed tool definitions are removed and their tools blocked.
+  - surface: [tool_definition]
+    when: { detector: injection_heuristic }
+    action: block
+  - surface: [tool_definition]
+    when: { pin_changed: true }
+    action: block
+  # A tainted session may not send email.
+  - surface: [tool_call]
+    when: { tool: send_email, session_tainted: true }
+    action: block

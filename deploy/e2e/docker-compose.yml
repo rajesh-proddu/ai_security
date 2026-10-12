@@ -1,0 +1,40 @@
+# Phase 1 e2e stack: ai_platform's local stack (agentgateway, vLLM, Redis), with
+# this repo's inspection service added and the sample MCP server swapped for
+# ours. See README.md.
+#
+# The gateway stack is consumed, not copied (ROADMAP "Cross-repo
+# dependencies"): ai_platform must be checked out next to this repo. Its
+# gateway config points both hooks at `ai-security-inspector:9000` and its MCP
+# target at `mcp-everything:3001/mcp`, so the service names below are a
+# contract.
+
+name: ai-security-e2e
+
+include:
+  - path:
+      - ../../../ai_platform/deploy/local/docker-compose.yml
+      # Replaces the sample MCP server with ours; see the file.
+      - ./ai-platform.override.yml
+
+services:
+  ai-security-inspector:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ai-security/inspector:e2e
+    environment:
+      ADDR: ":8080"
+      GRPC_ADDR: ":9000"
+      REDIS_ADDR: "redis:6379"
+      POLICY_FILE: /etc/ai_security/policy.yaml
+      # Audit events go to stdout; the e2e suite reads them with
+      # `docker compose logs`. (A bind-mounted file is not writable by the
+      # image's nonroot user.)
+    volumes:
+      - ./policy.yaml:/etc/ai_security/policy.yaml:ro
+    ports:
+      - "8080:8080" # HTTP: /healthz, /v1/inspect
+      - "9000:9000" # gRPC: ext_proc + ExtMcp (exposed for the latency check)
+    depends_on:
+      redis:
+        condition: service_healthy
