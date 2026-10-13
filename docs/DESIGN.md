@@ -168,14 +168,42 @@ Detection alone is not sufficient, so the service also applies mitigations that 
 ### 3.5 Streaming output
 
 Buffering a whole response defeats streaming; forwarding unscanned tokens defeats DLP. With ext_proc in streamed
-body mode, the service holds back a sliding window (default 256 chars — longer than the longest v1 pattern),
-scans it, and releases the safe prefix, redacting inside the window. A `block` mid-stream ends the stream with an
-error event that the adapter writes itself (an SSE error event and `[DONE]`, with `end_of_stream`). An ext_proc
-immediate response after the headers are sent cuts the stream off with HTTP 200 and no error. Blocking does not
-cancel upstream generation: the remaining chunks still arrive, are answered empty, and their tokens are still
-spent. Per route, policy can select `buffer_full` instead. Whether LiteLLM's guardrail API sees stream
-chunks or only the assembled response is a **Phase 2 spike item**; if only the latter, streamed routes on LiteLLM
-get post-hoc flagging, not redaction.
+body mode, the service holds back a sliding window and releases only text that can no longer be part of a finding,
+redacting as it goes. agentgateway accepts held chunks with no reply and a later reply carrying several chunks'
+bytes, so the release points are the service's to choose (checked live). The rules (`adapters/agentgateway/stream.go`):
+
+- **Held tail: 256 characters.** That covers every bounded v1 pattern, including those with internal spaces (cards,
+  Aadhaar, injection phrases). Text is inspected after every 64 new characters, not on every chunk.
+- **The trailing unbroken run is not inspected before it ends.** A key or digit run cut short can match a pattern
+  the complete token would not (an AWS id's `{16}\b`, a Luhn hit on a prefix), and keys have no upper length. A
+  run longer than 4 KB (minified JSON, say) is inspected and partly released anyway.
+- **A finding or redaction that crosses the release point moves it back** to the finding's start.
+- **A block mid-stream must hold for the settled text alone.** A pattern with internal spaces can match a prefix
+  of something longer still arriving (a spaced card held up to its third group has an Aadhaar-shaped run), and a
+  block acts on the whole verdict. So before end of stream the text up to the release point is re-inspected, and
+  the stream is blocked only if that blocks too; otherwise it keeps holding.
+- **Only whole SSE events are released,** in order; unchanged events go out byte for byte. A redaction that spans
+  several events puts the marker in the first and removes the covered text from the rest, so every event stays
+  valid JSON. Events without text (`finish_reason`, usage, `[DONE]`) wait behind the text before them.
+- **One window per chat choice**, so text from two choices is never joined into a false match.
+- **Other SSE formats** (Anthropic messages, OpenAI responses) are held to end of stream and inspected whole: they
+  repeat the full text in their final events, so windowing only the deltas would leak it. Those clients lose
+  incremental delivery until their formats get windows of their own.
+
+The cost is latency before the first token: about 325 characters (~80 tokens) are held before the first release.
+At vLLM-on-CPU speeds that is several seconds; at hosted-model speeds well under one.
+
+A `block` mid-stream ends the stream with an error event that the adapter writes itself (an SSE error event and
+`[DONE]`, with `end_of_stream`); text already released stays released. An ext_proc immediate response after the
+headers are sent would cut the stream off with HTTP 200 and no error. Blocking does not cancel upstream generation:
+the remaining chunks still arrive, are answered empty, and their tokens are still spent.
+
+Known limits: a pattern with an unbounded part (a long HTML comment or markdown image alt text, an injection phrase
+padded with whitespace) longer than the window can straddle a release point. Each inspection is one audit event,
+so a finding in the held tail can appear in several consecutive events. Streamed `tool_calls` arguments are not
+inspected. A per-route `buffer_full` option needs routes in the policy, which v1 does not have. Whether LiteLLM's
+guardrail API sees stream chunks or only the assembled response is a **Phase 2 spike item**; if only the latter,
+streamed routes on LiteLLM get post-hoc flagging, not redaction.
 
 ### 3.6 Policy
 

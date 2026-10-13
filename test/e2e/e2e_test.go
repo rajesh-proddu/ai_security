@@ -380,3 +380,58 @@ func TestMCPWithoutSessionHeader(t *testing.T) {
 		t.Errorf("send_email after taint, no x-session-id: %+v, want blocked", r.Error)
 	}
 }
+
+// PII in a streamed reply is redacted mid-stream (ROADMAP Phase 2). The rule is
+// output-only, so the model sees the PAN and may repeat it; a small model does
+// not always, so the test skips rather than fails when it does not, and fails
+// only if the raw value ever reaches the client.
+func TestStreamedOutputRedacted(t *testing.T) {
+	sess := session(t)
+	const pan = "ABCDE1234F"
+	b, _ := json.Marshal(map[string]any{
+		"model": "chat-default", "stream": true, "temperature": 0, "max_tokens": 120,
+		"messages": []any{msg("user", "Repeat this sentence exactly, three times: My PAN is "+pan+" and I live in Hyderabad.")},
+	})
+	req, _ := http.NewRequest(http.MethodPost, gateway+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-session-id", sess)
+	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HTTP %d: %s", resp.StatusCode, raw)
+	}
+	var text strings.Builder
+	for _, ev := range strings.Split(string(raw), "\n\n") {
+		d, ok := strings.CutPrefix(strings.TrimSpace(ev), "data: ")
+		if !ok || d == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(d), &chunk); err != nil {
+			t.Fatalf("event is not JSON: %v: %s", err, d)
+		}
+		for _, c := range chunk.Choices {
+			text.WriteString(c.Delta.Content)
+		}
+	}
+	got := text.String()
+	if strings.Contains(got, pan) {
+		t.Fatalf("the PAN reached the client unredacted: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Skipf("the model did not repeat the PAN, so there was nothing to redact: %q", got)
+	}
+	expectAudit(t, sess, "output redact pan", func(e auditEvent) bool {
+		return e.Surface == "output" && e.Action == "redact" && e.has("pan")
+	})
+}

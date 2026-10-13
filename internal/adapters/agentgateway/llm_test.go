@@ -132,7 +132,7 @@ func kinds(rs []*extproc.ProcessingResponse) string {
 
 // The spike's two captured exchanges, replayed: every body comes back byte for
 // byte, the non-streaming response's headers are held until its body is in,
-// and the streamed response is passed through chunk by chunk.
+// and the streamed response is held by the window and released unchanged.
 func TestLLMReplaysSpikeCapture(t *testing.T) {
 	rec := &recorder{}
 	c := extproc.NewExternalProcessorClient(dial(t, rec))
@@ -151,37 +151,28 @@ func TestLLMReplaysSpikeCapture(t *testing.T) {
 
 	for id, msgs := range streams {
 		replies := exchange(t, c, msgs)
-		var sentBodies, gotBodies [][]byte
+		// What each side of the gateway sees: the request body upstream, the
+		// response body at the client.
+		var sentReq, sentResp, gotReq, gotResp []byte
 		for _, m := range msgs {
-			if b := m.GetRequestBody(); b != nil {
-				sentBodies = append(sentBodies, b.GetBody())
-			}
-			if b := m.GetResponseBody(); b != nil {
-				sentBodies = append(sentBodies, b.GetBody())
-			}
+			sentReq = append(sentReq, m.GetRequestBody().GetBody()...)
+			sentResp = append(sentResp, m.GetResponseBody().GetBody()...)
 		}
 		for _, r := range replies {
-			if b, _, ok := bodyOf(r); ok {
-				gotBodies = append(gotBodies, b)
+			b, _, _ := bodyOf(r)
+			if r.GetRequestBody() != nil {
+				gotReq = append(gotReq, b...)
+			} else {
+				gotResp = append(gotResp, b...)
 			}
 		}
-		if len(gotBodies) != len(sentBodies) {
-			t.Fatalf("stream %d: %d bodies back, sent %d (%s)", id, len(gotBodies), len(sentBodies), kinds(replies))
+		if string(gotReq) != string(sentReq) || string(gotResp) != string(sentResp) {
+			t.Errorf("stream %d changed:\n got req %q resp %q\nsent req %q resp %q", id, gotReq, gotResp, sentReq, sentResp)
 		}
-		for i := range sentBodies {
-			if string(gotBodies[i]) != string(sentBodies[i]) {
-				t.Errorf("stream %d body %d changed:\n got %q\nsent %q", id, i, gotBodies[i], sentBodies[i])
-			}
-		}
-		switch id {
-		case 1: // non-streaming: response headers held until the body is inspected
-			if got := kinds(replies); got != "reqH,reqB,respH,respB" {
-				t.Errorf("stream 1 replies = %s", got)
-			}
-		case 2:
-			if !strings.HasPrefix(kinds(replies), "reqH,reqB,respH,respB,respB") {
-				t.Errorf("stream 2 replies = %s", kinds(replies))
-			}
+		if got := kinds(replies); got != "reqH,reqB,respH,respB" {
+			// Stream 1 holds its response headers until the body is in;
+			// stream 2's window holds its short text to end of stream.
+			t.Errorf("stream %d replies = %s", id, got)
 		}
 	}
 
@@ -192,9 +183,10 @@ func TestLLMReplaysSpikeCapture(t *testing.T) {
 			t.Errorf("%s: session = %q, want s1", r.Surface, r.Session)
 		}
 	}
-	// Two requests inspected as input; only the non-streaming response as output.
-	if surfaces[core.SurfaceInput] != 2 || surfaces[core.SurfaceOutput] != 1 {
-		t.Errorf("inspections = %v, want 2 input and 1 output", surfaces)
+	// Two requests as input; both responses as output (the streamed one once,
+	// at end of stream, because its text is shorter than the window).
+	if surfaces[core.SurfaceInput] != 2 || surfaces[core.SurfaceOutput] != 2 {
+		t.Errorf("inspections = %v, want 2 input and 2 output", surfaces)
 	}
 }
 

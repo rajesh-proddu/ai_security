@@ -6,6 +6,11 @@ rules:
   - surface: [input, output, tool_call, tool_result]
     when: { detector: pii, type_in: [card, aadhaar] }
     action: redact
+  # Output only, so the model can see one in the prompt and the streamed
+  # reply shows redaction mid-stream (test/e2e TestStreamedOutputRedacted).
+  - surface: [output]
+    when: { detector: pii, type_in: [pan] }
+    action: redact
   # Credentials never reach the model or the user.
   - surface: [input, output]
     when: { detector: secrets }

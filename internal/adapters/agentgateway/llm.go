@@ -26,8 +26,9 @@ import (
 // Request bodies are buffered to end of stream, inspected, and sent back in
 // one piece. Non-streaming JSON responses are handled the same way, and the
 // reply to their response headers is held until the body is inspected, so a
-// block can still become a clean error response. Streaming (SSE) responses are
-// passed through chunk by chunk.
+// block can still become a clean error response. Streaming (SSE) responses go
+// through a sliding window that holds back text until it is safe to release
+// (stream.go).
 //
 // OpenAI chat completions are parsed by message, keeping roles and marking
 // `tool` messages untrusted. Every other JSON body on the route (Anthropic
@@ -35,8 +36,6 @@ import (
 // without parsing its format: its prose fields go to input or output, skipping
 // ids, enums and base64 media (see textLeaves). Otherwise an agent could avoid
 // every input rule by calling a different endpoint on the same gateway.
-//
-// TODO(phase-2): window redaction for streaming responses (DESIGN §3.5).
 type LLM struct {
 	extproc.UnimplementedExternalProcessorServer
 	Inspector core.Inspector
@@ -57,6 +56,9 @@ type llmStream struct {
 	inspectResponse bool
 	heldHeaders     bool
 	respBody        []byte
+
+	// window is set for a 2xx streamed (SSE) response.
+	window *streamWindow
 }
 
 func (l *LLM) Process(s extproc.ExternalProcessor_ProcessServer) error {
@@ -111,7 +113,18 @@ func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.Processing
 
 	case *extproc.ProcessingRequest_ResponseHeaders:
 		h := headerMap(r.ResponseHeaders.GetHeaders())
-		st.inspectResponse = !r.ResponseHeaders.GetEndOfStream() && success(h[":status"]) && isJSON(h["content-type"])
+		hasBody := !r.ResponseHeaders.GetEndOfStream() && success(h[":status"])
+		if hasBody && isSSE(h["content-type"]) {
+			st.window = newStreamWindow(func(ctx context.Context, text string) (core.Verdict, error) {
+				return l.Inspector.Inspect(ctx, core.Request{
+					Surface: core.SurfaceOutput,
+					Session: st.session,
+					Parts:   []core.Part{{Role: "assistant", Text: text, Trust: core.TrustTrusted}},
+				})
+			})
+			return one(responseHeadersReply()), false, nil
+		}
+		st.inspectResponse = hasBody && isJSON(h["content-type"])
 		if st.inspectResponse {
 			st.heldHeaders = true
 			return nil, false, nil
@@ -121,6 +134,13 @@ func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.Processing
 	case *extproc.ProcessingRequest_ResponseBody:
 		chunk := r.ResponseBody.GetBody()
 		eos := r.ResponseBody.GetEndOfStream()
+		if st.window != nil {
+			out, reply, end, err := st.window.chunk(ctx, chunk, eos)
+			if err != nil || !reply {
+				return nil, false, err
+			}
+			return one(responseBodyReply(out, end)), false, nil
+		}
 		if !st.inspectResponse {
 			return one(responseBodyReply(chunk, eos)), false, nil
 		}
@@ -326,6 +346,11 @@ func messageText(msg map[string]any) []textField {
 func isChat(path string) bool {
 	p, _, _ := strings.Cut(path, "?")
 	return strings.HasSuffix(p, "/chat/completions")
+}
+
+func isSSE(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mt == "text/event-stream"
 }
 
 func isJSON(contentType string) bool {
