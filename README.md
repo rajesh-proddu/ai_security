@@ -1,7 +1,7 @@
 # ai_security
 
-Security layer for enterprise AI agents: an inspection, policy and evidence service that agent gateways
-(agentgateway, LiteLLM) call to inspect tool definitions, input prompts, tool calls, tool/RAG content and LLM
+Security layer for enterprise AI agents: an inspection, policy and evidence service that the agent
+gateway (agentgateway) calls to inspect tool definitions, input prompts, tool calls, tool/RAG content and LLM
 output — blocking prompt injection and redacting sensitive data. Customer-run data plane, vendor-hosted control
 plane.
 
@@ -23,7 +23,7 @@ detectors, the policy evaluator and the gateway adapters are stubs. Every hop is
 | `internal/policy` | The YAML policy of DESIGN §3.6, its loader, and the evaluator |
 | `internal/session` | Cross-surface taint, tool-definition pins and blocked tools (in-memory, or Redis with `REDIS_ADDR`) |
 | `internal/audit` | Metadata-and-hashes-only event and a JSON-lines sink |
-| `internal/adapters/{agentgateway,litellm,http}` | Wire-format adapters; `agentgateway` and `http` are implemented, `litellm` is Phase 2 |
+| `internal/adapters/{agentgateway,http}` | Wire-format adapters for agentgateway (LLM and MCP routes; A2A in Phase 2) and plain HTTP |
 | `deploy/e2e` | Phase 1 e2e stack: ai_platform's gateway stack + this inspector + a sample MCP server ([README](deploy/e2e/README.md)) |
 | `test/e2e` | The e2e suite (`-tags e2e`; `make e2e-up e2e`) |
 
