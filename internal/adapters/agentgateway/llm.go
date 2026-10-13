@@ -11,6 +11,8 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/rajesh-proddu/ai_security/internal/core"
 )
@@ -59,6 +61,9 @@ type llmStream struct {
 
 	// window is set for a 2xx streamed (SSE) response.
 	window *streamWindow
+
+	// a2a is set when the route declared itself an A2A route.
+	a2a *a2aState
 }
 
 func (l *LLM) Process(s extproc.ExternalProcessor_ProcessServer) error {
@@ -90,11 +95,23 @@ func (l *LLM) Process(s extproc.ExternalProcessor_ProcessServer) error {
 // handle returns the replies for one message, and whether the exchange is over
 // (an immediate response ends it).
 func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.ProcessingRequest) ([]*extproc.ProcessingResponse, bool, error) {
+	if _, isHeaders := msg.GetRequest().(*extproc.ProcessingRequest_RequestHeaders); st.a2a != nil && !isHeaders {
+		return l.handleA2A(ctx, st, msg)
+	}
 	switch r := msg.GetRequest().(type) {
 	case *extproc.ProcessingRequest_RequestHeaders:
 		h := headerMap(r.RequestHeaders.GetHeaders())
 		st.path = h[":path"]
 		st.session = sessionFrom(func(k string) string { return h[k] })
+		if md := routeMetadata(msg.GetMetadataContext()); md["protocol"] == "a2a" {
+			// The agent's identity must come from the route: the Host header
+			// is the client's to choose, so keying on it would let a client
+			// escape a block. Without it the exchange fails closed.
+			if md["agent"] == "" {
+				return nil, false, status.Error(codes.FailedPrecondition, "a2a route has no ai_security.agent in its ext_proc metadataContext")
+			}
+			st.a2a = &a2aState{route: a2aRoute{agent: md["agent"], inbound: md["direction"] == "inbound"}}
+		}
 		return one(requestHeadersReply()), false, nil
 
 	case *extproc.ProcessingRequest_RequestBody:
@@ -165,13 +182,19 @@ func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.Processing
 		}
 		return append(out, responseBodyReply(body, true)), false, nil
 
-	case *extproc.ProcessingRequest_RequestTrailers:
-		return one(&extproc.ProcessingResponse{Response: &extproc.ProcessingResponse_RequestTrailers{RequestTrailers: &extproc.TrailersResponse{}}}), false, nil
-
-	case *extproc.ProcessingRequest_ResponseTrailers:
-		return one(&extproc.ProcessingResponse{Response: &extproc.ProcessingResponse_ResponseTrailers{ResponseTrailers: &extproc.TrailersResponse{}}}), false, nil
 	}
-	return nil, false, nil
+	return trailersReply(msg), false, nil
+}
+
+// trailersReply answers trailers; any other message gets no reply.
+func trailersReply(msg *extproc.ProcessingRequest) []*extproc.ProcessingResponse {
+	switch msg.GetRequest().(type) {
+	case *extproc.ProcessingRequest_RequestTrailers:
+		return one(&extproc.ProcessingResponse{Response: &extproc.ProcessingResponse_RequestTrailers{RequestTrailers: &extproc.TrailersResponse{}}})
+	case *extproc.ProcessingRequest_ResponseTrailers:
+		return one(&extproc.ProcessingResponse{Response: &extproc.ProcessingResponse_ResponseTrailers{ResponseTrailers: &extproc.TrailersResponse{}}})
+	}
+	return nil
 }
 
 // inspectRequest inspects a chat completions request: the conversation on the

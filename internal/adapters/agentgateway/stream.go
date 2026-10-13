@@ -79,6 +79,9 @@ type toolFragment struct {
 type streamField struct {
 	key string // the text stream: "c0", "c1", ... per chat choice; "" otherwise
 	ev  *sseEvent
+	// complete marks text that arrives whole (an A2A status message), which is
+	// inspected and released at once rather than held for the window.
+	complete bool
 	textField
 }
 
@@ -117,6 +120,11 @@ type streamWindow struct {
 	// inspectTool inspects one reassembled tool call and returns the arguments
 	// to send on, or blocked. Nil skips tool calls.
 	inspectTool func(ctx context.Context, name, args string) (string, bool, error)
+	// extract, when set, finds the text in an event for a protocol other than
+	// chat completions (A2A); the stream is then windowed by its keys.
+	extract func(data any) []streamField
+	// blockBytes is what the client receives when the stream is blocked.
+	blockBytes []byte
 
 	pending  []byte // bytes not yet framed into an event
 	held     []*sseEvent
@@ -127,7 +135,7 @@ type streamWindow struct {
 }
 
 func newStreamWindow(inspect func(context.Context, string) (core.Verdict, error)) *streamWindow {
-	return &streamWindow{inspect: inspect, lastEval: map[string]int{}}
+	return &streamWindow{inspect: inspect, lastEval: map[string]int{}, blockBytes: blockedStream}
 }
 
 // blockedStream is what the client receives when a stream is blocked: an error
@@ -165,7 +173,7 @@ func (w *streamWindow) chunk(ctx context.Context, b []byte, eos bool) (out []byt
 	if blocked {
 		w.blocked = true
 		w.held = nil
-		return blockedStream, true, true, nil
+		return w.blockBytes, true, true, nil
 	}
 	if len(release) == 0 && !eos {
 		return nil, false, false, nil
@@ -174,6 +182,16 @@ func (w *streamWindow) chunk(ctx context.Context, b []byte, eos bool) (out []byt
 }
 
 func (w *streamWindow) add(ev *sseEvent) {
+	if w.extract != nil {
+		if ev.data != nil {
+			ev.fields = w.extract(ev.data)
+			for i := range ev.fields {
+				ev.fields[i].ev = ev
+			}
+		}
+		w.held = append(w.held, ev)
+		return
+	}
 	if !w.format && ev.data != nil {
 		w.format = true
 		w.buffered = !isChatChunk(ev.data)
@@ -209,6 +227,9 @@ type textStream struct {
 	// it by its new length would release an event that still reaches past
 	// the release point.
 	ends []int
+	// complete: every field arrived whole, so the stream is inspected as if
+	// at its end.
+	complete bool
 }
 
 func (w *streamWindow) streams() map[string]*textStream {
@@ -218,9 +239,10 @@ func (w *streamWindow) streams() map[string]*textStream {
 			f := &ev.fields[i]
 			s := out[f.key]
 			if s == nil {
-				s = &textStream{}
+				s = &textStream{complete: true}
 				out[f.key] = s
 			}
+			s.complete = s.complete && f.complete
 			s.fields = append(s.fields, f)
 			s.starts = append(s.starts, s.text.Len())
 			s.text.WriteString(f.text)
@@ -246,6 +268,7 @@ func (w *streamWindow) evaluate(ctx context.Context, final bool) ([]byte, bool, 
 	for _, k := range keys {
 		s := streams[k]
 		text := s.text.String()
+		final := final || s.complete
 		scanEnd := len(text)
 		if !final {
 			scanEnd = trailingRunStart(text)

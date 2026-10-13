@@ -148,3 +148,46 @@ Both gRPC services can be served on the one `:9000` listener, as the spike serve
   and pin check, including tools removed from the list earlier in the session); `tools/call` result → `tool_result`
   surface (redact and taint). Session from `metadata_context.session`.
 - The spike did not measure fast-path latency through the gateway; that is part of the Phase 1 e2e work.
+
+## A2A routes (spike, 2026-10-13)
+
+agentgateway v1.5.0 proxies A2A as an HTTP route marked with the `a2a` policy. It classifies agent-card
+fetches and JSON-RPC calls, rewrites the card's URLs to point at the gateway, and adds telemetry. Unlike
+MCP, **there is no A2A-specific guardrail hook**; the inspector sees A2A traffic through ordinary
+route-level `extProc`. Run against a minimal A2A v0.3 agent (agent card, `message/send`, `message/stream`)
+with a capturing ext_proc server. All observed; the capture is
+`internal/adapters/agentgateway/testdata/extproc_a2a_flows.jsonl`, one object per message: `kind`
+(`request_headers`, `request_body`, `response_headers`, `response_body`), `stream`, and decoded `headers`
+/ `body` / `metadata`. This format differs from the other fixtures, which are protojson.
+
+| Flow | What ext_proc receives |
+|---|---|
+| `GET /.well-known/agent-card.json` | the card as the response body, **after** the gateway rewrote `url` to the gateway's own address |
+| `message/send` | the JSON-RPC request (method, `params.message.parts`), then the JSON-RPC result (an agent `Message`) |
+| `message/stream` | the request, then SSE events, each a JSON-RPC envelope around a `status-update` or `artifact-update`; artifact text is split across events |
+
+- `x-session-id` arrives in the request headers, as on the LLM route.
+- **Per-route metadata works.** `extProc.metadataContext` has the shape
+  `{<namespace>: {<key>: <CEL expression>}}` and arrives as `metadata_context.filter_metadata`. With
+  `ai_security: {protocol: '"a2a"'}` on the route, ext_proc received `{"ai_security": {"protocol": "a2a"}}`.
+  So each route can declare its protocol (and, for A2A, the agent's identity and the direction), and the
+  inspector does not have to infer them from the traffic.
+- Both LLM and A2A routes call the same `ExternalProcessor` service, so that metadata is how one
+  listener tells them apart.
+
+Design consequences (see DESIGN §3.2):
+- **Agent identity comes from the route's metadata, never from the card.** The card is written by the
+  remote agent, which could rename itself to escape a block or collide with another agent's pin.
+- **Fields the gateway rewrites (`url`, `supportedInterfaces[].url`) stay out of the pin hash**, or two
+  clients reaching the gateway by different hostnames would look like a rug pull.
+- **Text comes from A2A `parts`, not from every string**: message, task and artifact ids are UUIDs that
+  would trip the entropy detector.
+- **Blocks are A2A-native**: a JSON-RPC error with the request's id. The A2A spec reserves `-32001` to
+  `-32099`, so the block uses `-32000`, the generic server-error code.
+- The current A2A spec (v1.0) renames methods (`SendMessage`, `SendStreamingMessage`) and drops `kind`
+  from parts and events (`{"text": ...}`, `{"artifactUpdate": {...}}`). The adapter reads both versions.
+
+Configuration, checked with the v1.5.0 binary: an A2A route can sit on the same gateway as `ai_platform`'s
+`llm:` and `mcp:` sections as a top-level `routes:` entry (it attaches to the `default` gateway), under its
+own path prefix with a `urlRewrite`, e.g. `pathPrefix: /a2a/video-catalogue`. The config validates against the
+schema, LLM traffic still takes the LLM route, and the A2A route is inspected as A2A.
