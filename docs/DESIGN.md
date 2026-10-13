@@ -187,12 +187,20 @@ bytes, so the release points are the service's to choose (checked live). The rul
   several events puts the marker in the first and removes the covered text from the rest, so every event stays
   valid JSON. Events without text (`finish_reason`, usage, `[DONE]`) wait behind the text before them.
 - **One window per chat choice**, so text from two choices is never joined into a false match.
+- **Tool calls the model emits** (`delta.tool_calls`) are held to end of stream, reassembled per call and inspected
+  on the `tool_call` surface (below).
 - **Other SSE formats** (Anthropic messages, OpenAI responses) are held to end of stream and inspected whole: they
   repeat the full text in their final events, so windowing only the deltas would leak it. Those clients lose
   incremental delivery until their formats get windows of their own.
 
 The cost is latency before the first token: about 325 characters (~80 tokens) are held before the first release.
 At vLLM-on-CPU speeds that is several seconds; at hosted-model speeds well under one.
+
+**Tool calls the model emits.** On the LLM path, each `tool_calls` entry in a response (non-streaming, or
+reassembled from a stream) is inspected on the `tool_call` surface with the function name as the source, so
+`tool:` rules, session taint and blocked tools apply to the model's calls as they do to MCP calls; session state
+is shared, so a tool blocked from an MCP `tools/list` cannot be called by the model either. A block rejects the
+response (403, or an error event mid-stream); a redaction rewrites the `arguments` string.
 
 A `block` mid-stream ends the stream with an error event that the adapter writes itself (an SSE error event and
 `[DONE]`, with `end_of_stream`); text already released stays released. An ext_proc immediate response after the
@@ -201,8 +209,7 @@ the remaining chunks still arrive, are answered empty, and their tokens are stil
 
 Known limits: a pattern with an unbounded part (a long HTML comment or markdown image alt text, an injection phrase
 padded with whitespace) longer than the window can straddle a release point. Each inspection is one audit event,
-so a finding in the held tail can appear in several consecutive events. Streamed `tool_calls` arguments are not
-inspected. A per-route `buffer_full` option needs routes in the policy, which v1 does not have.
+so a finding in the held tail can appear in several consecutive events. A per-route `buffer_full` option needs routes in the policy, which v1 does not have.
 
 ### 3.6 Policy
 

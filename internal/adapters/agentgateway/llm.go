@@ -122,6 +122,9 @@ func (l *LLM) handle(ctx context.Context, st *llmStream, msg *extproc.Processing
 					Parts:   []core.Part{{Role: "assistant", Text: text, Trust: core.TrustTrusted}},
 				})
 			})
+			st.window.inspectTool = func(ctx context.Context, name, args string) (string, bool, error) {
+				return l.inspectToolCall(ctx, st.session, name, args)
+			}
 			return one(responseHeadersReply()), false, nil
 		}
 		st.inspectResponse = hasBody && isJSON(h["content-type"])
@@ -243,8 +246,8 @@ func (l *LLM) inspectRequest(ctx context.Context, st *llmStream) ([]byte, bool, 
 }
 
 // inspectResponse inspects the assistant text of a chat completions response
-// on the output surface, and any other JSON response without parsing its
-// format.
+// on the output surface, and each tool call the model emits on the tool_call
+// surface; any other JSON response is inspected without parsing its format.
 func (l *LLM) inspectResponse(ctx context.Context, st *llmStream) ([]byte, bool, error) {
 	v, err := decodeJSON(st.respBody)
 	if err != nil {
@@ -256,35 +259,100 @@ func (l *LLM) inspectResponse(ctx context.Context, st *llmStream) ([]byte, bool,
 	resp, _ := v.(map[string]any)
 	choices, _ := resp["choices"].([]any)
 	var fields []textField
+	var calls []map[string]any // each tool call's "function" object
 	for _, c := range choices {
 		choice, _ := c.(map[string]any)
-		if msg, ok := choice["message"].(map[string]any); ok {
-			fields = append(fields, messageText(msg)...)
+		msg, ok := choice["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		fields = append(fields, messageText(msg)...)
+		tcs, _ := msg["tool_calls"].([]any)
+		for _, tc := range tcs {
+			call, _ := tc.(map[string]any)
+			if fn, ok := call["function"].(map[string]any); ok {
+				calls = append(calls, fn)
+			}
 		}
 	}
-	if len(fields) == 0 {
+
+	changed := false
+	if len(fields) > 0 {
+		model, _ := resp["model"].(string)
+		verdict, err := l.Inspector.Inspect(ctx, core.Request{
+			Surface: core.SurfaceOutput,
+			Session: st.session,
+			Source:  model,
+			Parts:   parts(fields, "assistant", core.TrustTrusted),
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		switch verdict.Action {
+		case core.ActionBlock:
+			return nil, true, nil
+		case core.ActionRedact:
+			changed = redactFields(fields, verdict.Redactions)
+		}
+	}
+	for _, fn := range calls {
+		name, _ := fn["name"].(string)
+		args, _ := fn["arguments"].(string)
+		newArgs, blocked, err := l.inspectToolCall(ctx, st.session, name, args)
+		if err != nil {
+			return nil, false, err
+		}
+		if blocked {
+			return nil, true, nil
+		}
+		if newArgs != args {
+			fn["arguments"] = newArgs
+			changed = true
+		}
+	}
+	if !changed {
 		return st.respBody, false, nil
 	}
-	model, _ := resp["model"].(string)
+	b, err := encodeJSON(resp)
+	return b, false, err
+}
+
+// inspectToolCall inspects a tool call the model emitted, on the tool_call
+// surface with the function name as the source, so `tool:` rules, session
+// taint and blocked tools apply to it as they do to MCP calls. args is the
+// JSON-encoded arguments string; its text fields are inspected, and on a
+// redaction the string is re-encoded. Arguments that are not JSON are
+// inspected as one string. It returns the arguments to send on.
+func (l *LLM) inspectToolCall(ctx context.Context, session, name, args string) (string, bool, error) {
+	var fields []textField
+	v, err := decodeJSON([]byte(args))
+	if err == nil {
+		stringLeaves(v, &fields)
+	} else if args != "" {
+		fields = []textField{{text: args, set: func(n string) { args = n }}}
+	}
 	verdict, err := l.Inspector.Inspect(ctx, core.Request{
-		Surface: core.SurfaceOutput,
-		Session: st.session,
-		Source:  model,
-		Parts:   parts(fields, "assistant", core.TrustTrusted),
+		Surface: core.SurfaceToolCall,
+		Session: session,
+		Source:  name,
+		Parts:   parts(fields, "tool", core.TrustTrusted),
 	})
 	if err != nil {
-		return nil, false, err
+		return "", false, err
 	}
 	switch verdict.Action {
 	case core.ActionBlock:
-		return nil, true, nil
+		return "", true, nil
 	case core.ActionRedact:
-		if redactFields(fields, verdict.Redactions) {
-			b, err := encodeJSON(resp)
-			return b, false, err
+		if redactFields(fields, verdict.Redactions) && v != nil {
+			b, err := encodeJSON(v)
+			if err != nil {
+				return "", false, err
+			}
+			return string(b), false, nil
 		}
 	}
-	return st.respBody, false, nil
+	return args, false, nil
 }
 
 // inspectAny inspects a JSON body of a format we do not parse: its prose

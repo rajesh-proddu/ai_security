@@ -38,11 +38,16 @@ import (
 // inspected whole: those formats repeat the full text in their final events,
 // so windowing only the deltas would leak it.
 //
+// Tool calls the model emits (delta.tool_calls) arrive with their arguments
+// split across events. Events carrying them are held to end of stream; each
+// call is then reassembled and inspected on the tool_call surface. A redaction
+// rewrites the arguments into the call's first fragment and empties the rest,
+// so the client's concatenation stays valid JSON.
+//
 // Known limits: a pattern with an unbounded part (a long HTML comment or
 // markdown image alt text, an injection phrase padded with whitespace) longer
 // than the window can straddle a release point. Each inspection is one audit
 // event, so a finding in the held tail can appear in two consecutive events.
-// Streamed tool_calls arguments are not inspected.
 const (
 	windowSize = 256  // characters held back; covers the bounded v1 patterns
 	evalEvery  = 64   // inspect after this many new characters, not on every chunk
@@ -52,11 +57,22 @@ const (
 
 // sseEvent is one server-sent event, as received.
 type sseEvent struct {
-	raw    []byte // original bytes, including the blank-line terminator
-	lines  []string
-	data   any // the decoded JSON of the data lines, if any
-	fields []streamField
-	dirty  bool // a field was changed; re-encode on release
+	raw       []byte // original bytes, including the blank-line terminator
+	lines     []string
+	data      any // the decoded JSON of the data lines, if any
+	fields    []streamField
+	toolCalls []toolFragment
+	dirty     bool // a field was changed; re-encode on release
+}
+
+// toolFragment is one piece of a streamed tool call: the call is identified by
+// choice and tool_calls index; the name usually comes in the first fragment and
+// the arguments string is spread across several.
+type toolFragment struct {
+	call string // choice index + "." + tool_calls index
+	name string
+	args *textField
+	ev   *sseEvent
 }
 
 // streamField is one piece of text in an event, in a text stream.
@@ -98,6 +114,9 @@ func (e *sseEvent) bytes() []byte {
 // streamWindow is the state of one streamed response.
 type streamWindow struct {
 	inspect func(ctx context.Context, text string) (core.Verdict, error)
+	// inspectTool inspects one reassembled tool call and returns the arguments
+	// to send on, or blocked. Nil skips tool calls.
+	inspectTool func(ctx context.Context, name, args string) (string, bool, error)
 
 	pending  []byte // bytes not yet framed into an event
 	held     []*sseEvent
@@ -168,9 +187,13 @@ func (w *streamWindow) add(ev *sseEvent) {
 			}
 		} else {
 			ev.fields = chatChunkFields(ev.data)
+			ev.toolCalls = chatChunkToolCalls(ev.data)
 		}
 		for i := range ev.fields {
 			ev.fields[i].ev = ev
+		}
+		for i := range ev.toolCalls {
+			ev.toolCalls[i].ev = ev
 		}
 	}
 	w.held = append(w.held, ev)
@@ -287,7 +310,71 @@ func (w *streamWindow) evaluate(ctx context.Context, final bool) ([]byte, bool, 
 		releaseTo[k] = p
 		w.lastEval[k] = scanEnd
 	}
+	if final {
+		blocked, err := w.toolCallsAtEnd(ctx)
+		if err != nil || blocked {
+			return nil, blocked, err
+		}
+	}
 	return w.release(streams, releaseTo, final), false, nil
+}
+
+// toolCallsAtEnd reassembles each streamed tool call from its held fragments
+// and inspects it.
+func (w *streamWindow) toolCallsAtEnd(ctx context.Context) (bool, error) {
+	if w.inspectTool == nil {
+		return false, nil
+	}
+	type call struct {
+		name  string
+		frags []toolFragment
+	}
+	var order []string
+	calls := map[string]*call{}
+	for _, ev := range w.held {
+		for _, f := range ev.toolCalls {
+			c := calls[f.call]
+			if c == nil {
+				c = &call{}
+				calls[f.call] = c
+				order = append(order, f.call)
+			}
+			if c.name == "" {
+				c.name = f.name
+			}
+			c.frags = append(c.frags, f)
+		}
+	}
+	for _, id := range order {
+		c := calls[id]
+		var args strings.Builder
+		for _, f := range c.frags {
+			if f.args != nil {
+				args.WriteString(f.args.text)
+			}
+		}
+		newArgs, blocked, err := w.inspectTool(ctx, c.name, args.String())
+		if err != nil || blocked {
+			return blocked, err
+		}
+		if newArgs == args.String() {
+			continue
+		}
+		first := true
+		for _, f := range c.frags {
+			if f.args == nil {
+				continue
+			}
+			v := ""
+			if first {
+				v, first = newArgs, false
+			}
+			f.args.text = v
+			f.args.set(v)
+			f.ev.dirty = true
+		}
+	}
+	return false, nil
 }
 
 // wordStart moves p back to the start of the word it falls in, so text[:p]
@@ -326,6 +413,9 @@ func (w *streamWindow) release(streams map[string]*textStream, releaseTo map[str
 	n := 0
 	released := map[string]int{}
 	for _, ev := range w.held {
+		if !final && len(ev.toolCalls) > 0 {
+			break // tool calls are inspected whole, at end of stream
+		}
 		if !final {
 			ok := true
 			for i := range ev.fields {
@@ -451,6 +541,37 @@ func isChatChunk(v any) bool {
 	return hasChoices
 }
 
+// chatChunkToolCalls returns the tool call fragments in
+// choices[].delta.tool_calls.
+func chatChunkToolCalls(v any) []toolFragment {
+	m, _ := v.(map[string]any)
+	choices, _ := m["choices"].([]any)
+	var out []toolFragment
+	for _, c := range choices {
+		choice, _ := c.(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+		tcs, _ := delta["tool_calls"].([]any)
+		for _, tc := range tcs {
+			call, _ := tc.(map[string]any)
+			fn, _ := call["function"].(map[string]any)
+			f := toolFragment{call: numberString(choice["index"]) + "." + numberString(call["index"])}
+			f.name, _ = fn["name"].(string)
+			if a, ok := stringField(fn, "arguments"); ok {
+				f.args = &a
+			}
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func numberString(v any) string {
+	if s, ok := v.(interface{ String() string }); ok {
+		return s.String()
+	}
+	return "0"
+}
+
 // chatChunkFields returns choices[].delta.content, one text stream per choice
 // index.
 func chatChunkFields(v any) []streamField {
@@ -464,13 +585,7 @@ func chatChunkFields(v any) []streamField {
 		if !ok {
 			continue
 		}
-		idx := "0"
-		if n, ok := choice["index"]; ok {
-			if s, ok := n.(interface{ String() string }); ok {
-				idx = s.String()
-			}
-		}
-		out = append(out, streamField{key: "c" + idx, textField: f})
+		out = append(out, streamField{key: "c" + numberString(choice["index"]), textField: f})
 	}
 	return out
 }
